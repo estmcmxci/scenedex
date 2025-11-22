@@ -63,6 +63,7 @@ function transformDatabaseRow(row: any): Approval {
     signer: row.signer,
     signature: row.signature,
     timestamp: toFrontendTimestamp(row.timestamp),
+    safeTxHash: row.safetxhash || row.safeTxHash || undefined,
   };
 }
 
@@ -75,6 +76,7 @@ export async function createApproval(data: {
   signer: string;
   signature: string;
   timestamp: number; // Frontend ms
+  safeTxHash?: string; // Optional Safe transaction hash
 }): Promise<Result<Approval>> {
   try {
     // Validate input data
@@ -85,16 +87,20 @@ export async function createApproval(data: {
     }
 
     console.log(`✍️  Creating approval for release ${data.releaseId} by ${data.signer}`);
+    if (data.safeTxHash) {
+      console.log(`   Safe Tx Hash: ${data.safeTxHash}`);
+    }
 
     const result = await query(
-      `INSERT INTO approvals (releaseId, signer, signature, timestamp)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO approvals (releaseId, signer, signature, timestamp, safeTxHash)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
       [
         data.releaseId,
         data.signer,
         data.signature,
         toDbTimestamp(data.timestamp),
+        data.safeTxHash || null,
       ]
     );
 
@@ -124,7 +130,7 @@ export async function getApprovalsByReleaseId(releaseId: string): Promise<Result
     console.log(`🔍 Fetching approvals for release ${releaseId}`);
 
     const results = await getAll(
-      'SELECT signer, signature, timestamp FROM approvals WHERE releaseId = $1 ORDER BY timestamp ASC',
+      'SELECT signer, signature, timestamp, safeTxHash FROM approvals WHERE releaseId = $1 ORDER BY timestamp ASC',
       [releaseId]
     );
 
@@ -228,6 +234,34 @@ export async function deleteApproval(
     const errorMsg = err instanceof Error ? err.message : 'Unknown error';
     console.error(`❌ Failed to delete approval:`, errorMsg);
     return { success: false, error: `Failed to delete approval: ${errorMsg}` };
+  }
+}
+
+// ============================================================================
+// READ: Get existing Safe transaction hash for a release
+// ============================================================================
+
+export async function getSafeTxHashForRelease(releaseId: string): Promise<Result<string | null>> {
+  try {
+    if (!releaseId || typeof releaseId !== 'string') {
+      return { success: false, error: 'Invalid release ID' };
+    }
+
+    console.log(`🔍 Fetching Safe transaction hash for release ${releaseId}`);
+
+    const result = await getOne(
+      'SELECT safeTxHash FROM approvals WHERE releaseId = $1 AND safeTxHash IS NOT NULL LIMIT 1',
+      [releaseId]
+    );
+
+    const safeTxHash = result?.safetxhash || result?.safeTxHash || null;
+    console.log(`✅ Safe transaction hash for ${releaseId}: ${safeTxHash || 'None'}`);
+
+    return { success: true, data: safeTxHash };
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+    console.error(`❌ Failed to fetch Safe transaction hash for ${releaseId}:`, errorMsg);
+    return { success: false, error: `Failed to fetch Safe transaction hash: ${errorMsg}` };
   }
 }
 

@@ -25,8 +25,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyCuratorSignature, isSafeMember, getApprovalThreshold, getSafeAddress } from '@/lib/services/safe';
-import { createApproval, countApprovalsForRelease, hasApprovalFromSigner } from '@/lib/db/approvals';
-import { publishRelease } from '@/lib/services/jobs';
+import { createApproval, countApprovalsForRelease, hasApprovalFromSigner, getSafeTxHashForRelease } from '@/lib/db/approvals';
+import { publishReleaseViaSafe } from '@/lib/services/jobs';
 
 export async function POST(request: NextRequest) {
   try {
@@ -64,16 +64,17 @@ export async function POST(request: NextRequest) {
     console.log(`✅ Signature verified`);
     console.log(`   Recovered curator: ${curatorAddress}`);
 
-    // Step 3: Get Safe address from database
+    // Step 3: Get Safe address from database (user-specific or global)
     console.log('\nStep 3️⃣: Load Safe address from database');
     let safeAddress: string;
     try {
-      safeAddress = await getSafeAddress();
+      // Try to get user-specific Safe first, fallback to global settings
+      safeAddress = await getSafeAddress(curatorAddress);
       console.log(`✅ Safe address: ${safeAddress}`);
     } catch (error) {
       console.error(`❌ Failed to get Safe address:`, error);
       return NextResponse.json(
-        { success: false, error: 'Safe address not configured' },
+        { success: false, error: 'Safe address not configured. Please link a Safe to your wallet.' },
         { status: 500 }
       );
     }
@@ -110,8 +111,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Step 6: Store approval in database
-    console.log('\nStep 6️⃣: Store approval in database');
+    // Step 6: Check if this is the first approval (will create Safe transaction)
+    console.log('\nStep 6️⃣: Check if first approval');
+    const countBeforeResult = await countApprovalsForRelease(releaseId);
+    const isFirstApproval = !countBeforeResult.success || countBeforeResult.data === 0;
+    console.log(`   Is first approval: ${isFirstApproval}`);
+
+    // Step 7: Store approval in database (without safeTxHash initially)
+    console.log('\nStep 7️⃣: Store approval in database');
     const approvalResult = await createApproval({
       releaseId,
       signer: curatorAddress,
@@ -129,8 +136,8 @@ export async function POST(request: NextRequest) {
 
     console.log(`✅ Approval stored`);
 
-    // Step 7: Get approval threshold (Pattern 3)
-    console.log('\nStep 7️⃣: Get approval threshold from Safe');
+    // Step 8: Get approval threshold (Pattern 3)
+    console.log('\nStep 8️⃣: Get approval threshold from Safe');
     let threshold: number;
     try {
       threshold = await getApprovalThreshold(safeAddress);
@@ -143,8 +150,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Step 8: Count current approvals (Pattern 3)
-    console.log('\nStep 8️⃣: Count approvals for release');
+    // Step 9: Count current approvals (Pattern 3)
+    console.log('\nStep 9️⃣: Count approvals for release');
     const countResult = await countApprovalsForRelease(releaseId);
     if (!countResult.success) {
       console.error(`❌ Failed to count approvals: ${countResult.error}`);
@@ -157,28 +164,41 @@ export async function POST(request: NextRequest) {
     const approvalCount = countResult.data;
     console.log(`✅ Current approvals: ${approvalCount}/${threshold}`);
 
-    // Step 9: Check if threshold is met
-    console.log('\nStep 9️⃣: Check if threshold met');
+    // Step 10: Check if threshold is met
+    console.log('\nStep 1️⃣0️⃣: Check if threshold met');
     const thresholdMet = approvalCount >= threshold;
 
+    let safeTxHash: string | null = null;
+    let contractTxData: any = null;
+    
     if (thresholdMet) {
       console.log(`✅ THRESHOLD MET! (${approvalCount}/${threshold})`);
-      console.log(`\n🚀 Triggering publishRelease() job for: ${releaseId}`);
-
+      console.log(`\n🚀 Threshold met - returning transaction data for client-side execution`);
+      
+      // Get transaction data for split and Zora coin creation
+      // These will be signed and sent by the curator's connected wallet
       try {
-        await publishRelease(releaseId);
-        console.log(`✅ Release published successfully!`);
-      } catch (jobError) {
-        const errorMsg = jobError instanceof Error ? jobError.message : String(jobError);
-        console.warn(`⚠️ Publishing failed (but approval stored): ${errorMsg}`);
-        // Don't fail the entire request - approval is stored
+        const txDataResponse = await fetch(
+          `${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/releases/${releaseId}/contract-tx-data`
+        );
+        const txDataResult = await txDataResponse.json();
+        
+        if (txDataResult.success) {
+          contractTxData = txDataResult.data;
+          console.log(`✅ Contract transaction data prepared`);
+        } else {
+          console.warn(`⚠️ Failed to get contract transaction data: ${txDataResult.error}`);
+        }
+      } catch (error) {
+        console.warn(`⚠️ Error fetching contract transaction data:`, error);
+        // Continue - client can retry
       }
     } else {
       console.log(`⏳ Threshold not met yet: ${approvalCount}/${threshold}`);
     }
 
-    // Step 10: Return success response
-    console.log('\nStep 1️⃣0️⃣: Return success');
+    // Step 11: Return success response
+    console.log('\nStep 1️⃣1️⃣: Return success');
     console.log(`✅ ALL STEPS PASSED!\n`);
 
     return NextResponse.json(
@@ -190,8 +210,9 @@ export async function POST(request: NextRequest) {
           approvalCount,
           threshold,
           thresholdMet,
+          contractTxData: contractTxData || undefined, // Transaction data for split/Zora creation
           message: thresholdMet
-            ? `✅ Threshold met! Release will be published.`
+            ? `✅ Threshold met! Please sign the contract creation transactions.`
             : `⏳ Approval stored. ${threshold - approvalCount} more approval(s) needed.`,
         },
       },

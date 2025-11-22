@@ -87,6 +87,7 @@ export async function GET() {
           zoraCoinAddress: releaseData.scenedex.zoraCoinAddress,
           zoraCoinSymbol: releaseData.scenedex.zoraCoinSymbol,
           splitAddress: releaseData.scenedex.splitAddress,
+          creatorAddress: releaseData.primaryAddress, // Creator/submitter from ENS address record
         };
         
         // Filter out everything before SOMA013 (SOMA000-012)

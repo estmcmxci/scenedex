@@ -18,6 +18,8 @@ interface ReleaseData {
   zoraCoin: string
   splitAddress: string
   ens: string
+  submittedBy?: string | null
+  submittedByEnsName?: string | null
 }
 
 export default function ReleaseDetailPage() {
@@ -43,9 +45,13 @@ export default function ReleaseDetailPage() {
 
         const ensData = data.release
         
-        // Step 2: Fetch metadata JSON to get catalogueId and track title
+        // Step 2: Fetch metadata JSON to get catalogueId, track title, and submitter info
         let catalogueId = ensData.scenedex?.releaseId || ensName.split('.')[0]?.toUpperCase() || 'UNKNOWN'
         let trackTitle = catalogueId // Default to catalogueId if metadata fetch fails
+        let submittedBy: string | null = null
+        
+        // Get creator/submitter from ENS address record (always available)
+        submittedBy = ensData.primaryAddress || null
         
         if (ensData.scenedex?.metadataURI) {
           try {
@@ -69,6 +75,11 @@ export default function ReleaseDetailPage() {
               console.log('🎵 Extracted track title from metadata.name:', trackTitle)
             } else {
               console.warn('⚠️  No metadata.name found, using catalogueId as title')
+            }
+            
+            // Prefer submittedBy from metadata if available (more accurate)
+            if (metadata.properties?.submittedBy) {
+              submittedBy = metadata.properties.submittedBy
             }
           } catch (metaErr) {
             console.error('⚠️  Could not fetch metadata JSON:', metaErr)
@@ -107,6 +118,20 @@ export default function ReleaseDetailPage() {
           zoraCoin: ensData.scenedex?.zoraCoinAddress || 'Not deployed',
           splitAddress: ensData.scenedex?.splitAddress || 'Not deployed',
           ens: ensData.ensName,
+          submittedBy,
+        }
+
+        // Resolve ENS name for submitter
+        if (submittedBy) {
+          try {
+            const ensRes = await fetch(`/api/ens/resolve?address=${submittedBy}`)
+            const ensData = await ensRes.json()
+            if (ensData.success && ensData.data.name) {
+              transformedRelease.submittedByEnsName = ensData.data.name
+            }
+          } catch (err) {
+            console.log('Could not resolve ENS name for submitter:', err)
+          }
         }
 
         setRelease(transformedRelease)
@@ -206,6 +231,25 @@ export default function ReleaseDetailPage() {
               <div className="grid grid-cols-3 border-b border-gray-800 p-4 hover:bg-gray-900">
                 <dt className="text-gray-500 uppercase text-sm">Description</dt>
                 <dd className="col-span-2">{release.description}</dd>
+              </div>
+              <div className="grid grid-cols-3 border-b border-gray-800 p-4 hover:bg-gray-900">
+                <dt className="text-gray-500 uppercase text-sm">Submitted By</dt>
+                <dd className="col-span-2">
+                  {release.submittedBy ? (
+                    <div>
+                      {release.submittedByEnsName ? (
+                        <div>
+                          <div className="font-semibold text-white">{release.submittedByEnsName}</div>
+                          <div className="font-mono text-xs text-gray-400">{release.submittedBy}</div>
+                        </div>
+                      ) : (
+                        <span className="font-mono text-xs">{release.submittedBy}</span>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-gray-500 italic">Unknown</span>
+                  )}
+                </dd>
               </div>
               <div className="grid grid-cols-3 border-b border-gray-800 p-4 hover:bg-gray-900">
                 <dt className="text-gray-500 uppercase text-sm">Date</dt>

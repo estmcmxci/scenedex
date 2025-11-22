@@ -194,3 +194,177 @@ export async function getSplitDetails(splitAddress: Address) {
   }
 }
 
+// ============================================================================
+// SAFE TRANSACTION CALLDATA FUNCTIONS
+// These functions return calldata for Safe to execute (instead of executing directly)
+// ============================================================================
+
+/**
+ * Get calldata for creating a split contract
+ * Returns calldata that Safe can execute
+ * 
+ * @param safeAddress - Safe multisig address (50% recipient and owner)
+ * @param submitterAddress - Creator/submitter wallet address (50% recipient)
+ * @returns Calldata for createSplit call
+ */
+export async function getSplitCalldata(
+  safeAddress: Address,
+  submitterAddress: Address
+): Promise<{ to: string; data: string; value: string }> {
+  console.log(`\n📝 Preparing split creation calldata...`);
+  console.log(`   Safe (Curator):  ${safeAddress} (50%)`);
+  console.log(`   Submitter:       ${submitterAddress} (50%)\n`);
+
+  try {
+    // Validate addresses exist first
+    if (!safeAddress || typeof safeAddress !== 'string') {
+      throw new Error(`Safe address is undefined or not a string: ${safeAddress}`);
+    }
+    if (!submitterAddress || typeof submitterAddress !== 'string') {
+      throw new Error(`Submitter address is undefined or not a string: ${submitterAddress}`);
+    }
+    
+    // Validate address format
+    if (!safeAddress.startsWith('0x') || safeAddress.length !== 42) {
+      throw new Error(`Invalid safe address format: ${safeAddress}`);
+    }
+    if (!submitterAddress.startsWith('0x') || submitterAddress.length !== 42) {
+      throw new Error(`Invalid submitter address format: ${submitterAddress}`);
+    }
+
+    // Initialize Splits SDK client (we only need it for callData, not execution)
+    // NOTE: Using Base Sepolia client, but Safe is on Sepolia - this is intentional
+    // The split will be created on Base Sepolia (for Zora coins), but we're generating
+    // calldata that the Safe on Sepolia will execute. This won't work cross-chain!
+    // TODO: Need to create split separately or use Sepolia factory
+    const splitsClient = initializeSplitsClient();
+    
+    // First, predict the split address to check if it already exists
+    console.log(`   🔍 Predicting split address to check if it already exists...`);
+    const predictedSplit = await splitsClient.predictDeterministicAddress({
+      recipients: [
+        { address: safeAddress, percentAllocation: 50.0 },
+        { address: submitterAddress, percentAllocation: 50.0 },
+      ],
+      distributorFeePercent: 1.0,
+      totalAllocationPercent: 100.0,
+      splitType: 'Push' as any,
+      ownerAddress: safeAddress,
+      creatorAddress: safeAddress,
+    });
+    
+    const predictedAddress = typeof predictedSplit === 'string' 
+      ? predictedSplit 
+      : (predictedSplit as any)?.address || (predictedSplit as any)?.splitAddress;
+    
+    if (!predictedAddress) {
+      throw new Error(`Could not predict split address`);
+    }
+    
+    console.log(`   📋 Predicted split address: ${predictedAddress}`);
+    
+    // Check if split already exists on Sepolia (where Safe is)
+    const { createPublicClient, http } = await import('viem');
+    const { sepolia } = await import('viem/chains');
+    const sepoliaRpcUrl = process.env.SEPOLIA_RPC_URL;
+    if (!sepoliaRpcUrl) {
+      throw new Error('SEPOLIA_RPC_URL not set');
+    }
+    
+    const sepoliaClient = createPublicClient({
+      chain: sepolia,
+      transport: http(sepoliaRpcUrl),
+    });
+    
+    const existingCode = await sepoliaClient.getCode({ address: predictedAddress as `0x${string}` });
+    const splitExists = existingCode && existingCode !== '0x';
+    
+    if (splitExists) {
+      console.log(`   ⚠️  Split already exists at ${predictedAddress} - skipping creation`);
+      console.log(`   ✅ Will use existing split address: ${predictedAddress}`);
+      
+      // Return a no-op transaction (call to Safe itself with empty data)
+      // This allows the transaction to proceed without trying to create the split again
+      return {
+        to: safeAddress, // Call to Safe itself (no-op)
+        data: '0x', // Empty data (no operation)
+        value: '0',
+      };
+    }
+    
+    console.log(`   ✅ Split does not exist - will create new split`);
+
+    // Use callData.createSplit to get the transaction data
+    // Returns { to, data, value } format (compatible with Safe transactions and multicall)
+    const callDataResult = await splitsClient.callData.createSplit({
+      recipients: [
+        {
+          address: safeAddress,
+          percentAllocation: 50.0,
+        },
+        {
+          address: submitterAddress,
+          percentAllocation: 50.0,
+        },
+      ],
+      distributorFeePercent: 1.0,
+      totalAllocationPercent: 100.0,
+      splitType: 'Push' as any,
+      ownerAddress: safeAddress,
+      creatorAddress: safeAddress,
+    });
+
+    // Log the raw result to understand its structure
+    console.log(`   📋 Raw callData result type:`, typeof callDataResult);
+    console.log(`   📋 Raw callData result:`, JSON.stringify(callDataResult, null, 2));
+    
+    // Handle different possible return structures
+    let toAddress: string | undefined;
+    let dataHex: string | undefined;
+    let valueStr: string | undefined;
+
+    if (callDataResult && typeof callDataResult === 'object') {
+      // Try direct properties first
+      toAddress = (callDataResult as any).to;
+      dataHex = (callDataResult as any).data;
+      valueStr = (callDataResult as any).value;
+      
+      // If not found, try nested structures
+      if (!toAddress && (callDataResult as any).transaction) {
+        toAddress = (callDataResult as any).transaction?.to;
+        dataHex = (callDataResult as any).transaction?.data;
+        valueStr = (callDataResult as any).transaction?.value;
+      }
+      
+      // Try other possible property names
+      if (!toAddress) {
+        toAddress = (callDataResult as any).target || (callDataResult as any).address || (callDataResult as any).contractAddress;
+      }
+      if (!dataHex) {
+        dataHex = (callDataResult as any).callData || (callDataResult as any).encodedData || (callDataResult as any).calldata;
+      }
+    }
+
+    if (!toAddress) {
+      throw new Error(`Splits SDK callData.createSplit did not return a 'to' address. Result: ${JSON.stringify(callDataResult)}`);
+    }
+    if (!dataHex) {
+      throw new Error(`Splits SDK callData.createSplit did not return 'data'. Result: ${JSON.stringify(callDataResult)}`);
+    }
+
+    console.log(`   ✅ Calldata prepared for createSplit`);
+    console.log(`      To: ${toAddress}`);
+    console.log(`      Data length: ${dataHex.length} bytes`);
+
+    return {
+      to: toAddress,
+      data: dataHex,
+      value: valueStr || '0',
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`\n❌ Failed to get split calldata:`, errorMessage);
+    throw error;
+  }
+}
+

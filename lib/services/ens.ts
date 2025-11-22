@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 dotenv.config({ path: '.env.local' });
 
 import { namehash, normalize } from 'viem/ens';
-import { encodeAbiParameters, encodeFunctionData, createPublicClient, createWalletClient, http, Hex, keccak256, zeroAddress, toBytes, encodePacked } from 'viem';
+import { encodeAbiParameters, encodeFunctionData, createPublicClient, createWalletClient, http, Hex, keccak256, zeroAddress, toBytes, encodePacked, Address } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
 import type { Release } from '../types';
@@ -758,5 +758,309 @@ export async function executeENSRecords(
     console.error('❌ Failed to execute ENS records:', error);
     throw error;
   }
+}
+
+// ============================================================================
+// SAFE TRANSACTION CALLDATA FUNCTIONS
+// These functions return calldata for Safe to execute (instead of executing directly)
+// ============================================================================
+
+/**
+ * Get calldata for creating ENS subname via NameWrapper
+ * Returns calldata that Safe can execute
+ * 
+ * @param subnameLabel - e.g., "SOMA001" or "EROS001"
+ * @param parentNode - Namehash of parent domain (e.g., scenedex.eth)
+ * @param ownerAddress - Address that will own the subname (should be Safe address)
+ * @returns Calldata for setSubnodeRecord call
+ */
+export function getENSSubnameCalldata(
+  subnameLabel: string,
+  parentNode: string,
+  ownerAddress: string
+): { to: string; data: string; value: string } {
+  console.log(`\n📝 Preparing ENS subname calldata...`);
+
+  const NAMEWRAPPER_ADDRESS = (process.env.ENS_NAMEWRAPPER_SEPOLIA || '0x0635513f179D50A207757E05759CbD106d7dFcE8') as `0x${string}`;
+  const resolver = process.env.ENS_RESOLVER_SEPOLIA as `0x${string}`;
+  
+  if (!resolver) {
+    throw new Error('ENS_RESOLVER_SEPOLIA not set in .env.local');
+  }
+
+  // Normalize label
+  const normalizedLabel = normalize(subnameLabel);
+  console.log(`   Label: "${subnameLabel}" → "${normalizedLabel}" (normalized)`);
+
+  // Calculate expiry: 1 year in the future
+  const now = Math.floor(Date.now() / 1000);
+  const oneYearInSeconds = 365 * 24 * 60 * 60;
+  const expiryTimestamp = BigInt(now + oneYearInSeconds);
+
+  // NameWrapper ABI for setSubnodeRecord
+  const NAMEWRAPPER_ABI = [
+    {
+      name: 'setSubnodeRecord',
+      type: 'function',
+      stateMutability: 'nonpayable',
+      inputs: [
+        { name: 'parentNode', type: 'bytes32' },
+        { name: 'label', type: 'string' },
+        { name: 'owner', type: 'address' },
+        { name: 'resolver', type: 'address' },
+        { name: 'ttl', type: 'uint64' },
+        { name: 'fuses', type: 'uint32' },
+        { name: 'expiry', type: 'uint64' },
+      ],
+      outputs: [],
+    },
+  ];
+
+  const calldata = encodeFunctionData({
+    abi: NAMEWRAPPER_ABI,
+    functionName: 'setSubnodeRecord',
+    args: [
+      parentNode as `0x${string}`,
+      normalizedLabel,
+      ownerAddress as `0x${string}`,
+      resolver,
+      BigInt(0), // ttl
+      0, // fuses (no fuses burned)
+      expiryTimestamp,
+    ],
+  });
+
+  console.log(`   ✅ Calldata prepared for setSubnodeRecord`);
+  console.log(`      To: ${NAMEWRAPPER_ADDRESS}`);
+  console.log(`      Owner: ${ownerAddress}`);
+  console.log(`      Resolver: ${resolver}`);
+
+  return {
+    to: NAMEWRAPPER_ADDRESS,
+    data: calldata,
+    value: '0',
+  };
+}
+
+/**
+ * Get calldata for setting ENS address record (setAddr)
+ * Returns calldata that Safe can execute
+ * 
+ * @param subnameNode - Namehash of the subname
+ * @param creatorAddress - Address to set as the primary address
+ * @returns Calldata for setAddr call
+ */
+export function getENSAddressRecordCalldata(
+  subnameNode: string,
+  creatorAddress: string
+): { to: string; data: string; value: string } {
+  console.log(`\n📝 Preparing ENS address record calldata...`);
+
+  const resolver = process.env.ENS_RESOLVER_SEPOLIA as `0x${string}`;
+  if (!resolver) {
+    throw new Error('ENS_RESOLVER_SEPOLIA not set in .env.local');
+  }
+
+  // Resolver ABI for setAddr
+  const RESOLVER_ABI = [
+    {
+      name: 'setAddr',
+      type: 'function',
+      inputs: [
+        { name: 'node', type: 'bytes32' },
+        { name: 'addr', type: 'address' },
+      ],
+      outputs: [],
+      stateMutability: 'nonpayable',
+    },
+  ];
+
+  const calldata = encodeFunctionData({
+    abi: RESOLVER_ABI,
+    functionName: 'setAddr',
+    args: [subnameNode as `0x${string}`, creatorAddress as `0x${string}`],
+  });
+
+  console.log(`   ✅ Calldata prepared for setAddr`);
+  console.log(`      To: ${resolver}`);
+  console.log(`      Node: ${subnameNode}`);
+  console.log(`      Address: ${creatorAddress}`);
+
+  return {
+    to: resolver,
+    data: calldata,
+    value: '0',
+  };
+}
+
+/**
+ * Get complete ENS calldata for all operations
+ * Returns array of calldata operations in correct order:
+ * 1. Create subname (setSubnodeRecord)
+ * 2. Set address record (setAddr)
+ * 3. Set all text records (setText for each)
+ * 
+ * @param release - Release data
+ * @param coinAddress - Zora coin address
+ * @param coinSymbol - Zora coin symbol
+ * @param splitAddress - Splits contract address
+ * @param creatorAddress - Creator's address
+ * @param safeAddress - Safe address (will own the subname)
+ * @param erosNumber - Optional EROS number (if not provided, will get next available)
+ * @returns Array of calldata operations for Safe to execute
+ */
+export async function getENSCompleteCalldata(
+  release: Release,
+  coinAddress: string,
+  coinSymbol: string,
+  splitAddress: string,
+  creatorAddress: string,
+  safeAddress: string,
+  erosNumber?: number
+): Promise<Array<{ to: string; data: string; value: string }>> {
+  console.log(`\n📦 Preparing complete ENS calldata for Safe transaction...`);
+
+  // Get subname details (reuse registerEROSRelease logic)
+  const finalErosNumber = erosNumber !== undefined ? erosNumber : await getNextEROSNumber();
+  const subnameLabel = formatEROSNumber(finalErosNumber);
+  const ensDomain = process.env.ENS_DOMAIN || 'scenedex.eth';
+  const fullSubname = `${subnameLabel}.${ensDomain}`;
+  const subnameNode = getNamehash(fullSubname);
+
+  console.log(`   Subname: ${fullSubname}`);
+  console.log(`   Node: ${subnameNode}`);
+
+  const operations: Array<{ to: string; data: string; value: string }> = [];
+
+  // Step 1: Create subname (setSubnodeRecord)
+  const parentNode = getNamehash(ensDomain);
+  const subnameCalldata = getENSSubnameCalldata(subnameLabel, parentNode, safeAddress);
+  operations.push(subnameCalldata);
+  console.log(`   ✅ Added setSubnodeRecord calldata`);
+
+  // Step 2: Set address record (setAddr)
+  const addressCalldata = getENSAddressRecordCalldata(subnameNode, creatorAddress);
+  operations.push(addressCalldata);
+  console.log(`   ✅ Added setAddr calldata`);
+
+  // Step 3: Set all text records (setText)
+  const records = buildRecordsFromRelease(release, coinAddress, coinSymbol, splitAddress, creatorAddress, finalErosNumber);
+  const textRecordsCalldata = buildSetTextTransactions(subnameNode, records);
+  operations.push(...textRecordsCalldata);
+  console.log(`   ✅ Added ${textRecordsCalldata.length} setText calldata operations`);
+
+  console.log(`\n✅ Complete ENS calldata prepared: ${operations.length} operations total\n`);
+  return operations;
+}
+
+// ============================================================================
+// ENS REVERSE RESOLUTION (Address → Name)
+// ============================================================================
+
+/**
+ * Resolve an Ethereum address to its primary ENS name (reverse resolution)
+ * 
+ * IMPORTANT: Always verifies the forward resolution to prevent spoofing.
+ * If the resolved name doesn't point back to the original address, returns null.
+ * 
+ * @param address - The Ethereum address to resolve (0x...)
+ * @param chainId - Optional chain ID (defaults to Sepolia for testnet)
+ * @returns The ENS name (e.g., "scenester.eth") or null if not found or verification fails
+ * 
+ * @example
+ * const name = await resolveAddressToENS('0xf2fa1E8e06641C76Cfe2854c1e4D932a8b6e29fD');
+ * // Returns: "scenester.eth" (if registered and verified)
+ */
+export async function resolveAddressToENS(
+  address: Address | string,
+  chainId: number = sepolia.id
+): Promise<string | null> {
+  try {
+    const rpcUrl = process.env.SEPOLIA_RPC_URL || 'https://sepolia.infura.io/v3/' + process.env.INFURA_KEY;
+    
+    // Create public client for Sepolia (ENS resolution always starts from L1)
+    const publicClient = createPublicClient({
+      chain: sepolia,
+      transport: http(rpcUrl),
+    });
+
+    // Normalize address to ensure proper format
+    const normalizedAddress = address.toLowerCase() as Address;
+
+    console.log(`\n🔍 Resolving address to ENS name...`);
+    console.log(`   Address: ${normalizedAddress}`);
+    console.log(`   Chain: Sepolia (${sepolia.id})`);
+
+    // Step 1: Reverse resolution (address → name)
+    const ensName = await publicClient.getEnsName({
+      address: normalizedAddress,
+    });
+
+    if (!ensName) {
+      console.log(`   ❌ No ENS name found for address`);
+      return null;
+    }
+
+    console.log(`   ✅ Found ENS name: ${ensName}`);
+
+    // Step 2: Verify forward resolution (name → address) to prevent spoofing
+    // This is CRITICAL - always verify the reverse record points back to the original address
+    const resolvedAddress = await publicClient.getEnsAddress({
+      name: normalize(ensName),
+    });
+
+    if (!resolvedAddress) {
+      console.log(`   ⚠️ Forward resolution failed - name doesn't resolve to an address`);
+      return null;
+    }
+
+    const resolvedAddressLower = resolvedAddress.toLowerCase();
+    const originalAddressLower = normalizedAddress.toLowerCase();
+
+    if (resolvedAddressLower !== originalAddressLower) {
+      console.log(`   ⚠️ Verification failed - name resolves to different address`);
+      console.log(`      Expected: ${originalAddressLower}`);
+      console.log(`      Got: ${resolvedAddressLower}`);
+      return null;
+    }
+
+    console.log(`   ✅ Verification passed - name correctly points to address`);
+    console.log(`   ✅ Final result: ${ensName}\n`);
+
+    return ensName;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`❌ Failed to resolve address to ENS name: ${errorMessage}`);
+    return null;
+  }
+}
+
+/**
+ * Resolve multiple addresses to their ENS names
+ * 
+ * @param addresses - Array of Ethereum addresses to resolve
+ * @param chainId - Optional chain ID (defaults to Sepolia for testnet)
+ * @returns Map of address → ENS name (or null if not found)
+ */
+export async function resolveAddressesToENS(
+  addresses: (Address | string)[],
+  chainId: number = sepolia.id
+): Promise<Map<string, string | null>> {
+  const results = new Map<string, string | null>();
+  
+  // Resolve all addresses in parallel
+  const promises = addresses.map(async (address) => {
+    const normalizedAddress = address.toLowerCase();
+    const name = await resolveAddressToENS(address, chainId);
+    return { address: normalizedAddress, name };
+  });
+
+  const resolved = await Promise.all(promises);
+  
+  resolved.forEach(({ address, name }) => {
+    results.set(address, name);
+  });
+
+  return results;
 }
 

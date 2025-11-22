@@ -1,8 +1,8 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import Link from "next/link"
-import { List, Shield } from "lucide-react"
+import { List, Shield, Copy, Check } from "lucide-react"
 import { ConnectButton } from "@rainbow-me/rainbowkit"
 import { useAccount } from "wagmi"
 
@@ -15,6 +15,78 @@ export default function SubmitPage() {
     description: "",
   })
   const [audioFile, setAudioFile] = useState<File | null>(null)
+  const [safeAddress, setSafeAddress] = useState<string | null>(null)
+  const [safeAddressLoading, setSafeAddressLoading] = useState(true)
+  const [safeEnsName, setSafeEnsName] = useState<string | null>(null)
+  const [walletEnsName, setWalletEnsName] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  // Fetch Safe address on mount
+  useEffect(() => {
+    async function fetchSafeAddress() {
+      try {
+        const response = await fetch("/api/curator/safe-address")
+        const data = await response.json()
+        if (data.success && data.data.safeAddress) {
+          setSafeAddress(data.data.safeAddress)
+        }
+      } catch (error) {
+        console.error("Failed to fetch Safe address:", error)
+      } finally {
+        setSafeAddressLoading(false)
+      }
+    }
+    fetchSafeAddress()
+  }, [])
+
+  // Resolve Safe address to ENS name
+  useEffect(() => {
+    async function resolveSafeENS() {
+      if (!safeAddress) return
+
+      try {
+        const response = await fetch(`/api/ens/resolve?address=${safeAddress}`)
+        const data = await response.json()
+        if (data.success && data.data.name) {
+          setSafeEnsName(data.data.name)
+        }
+      } catch (error) {
+        console.error("Failed to resolve Safe ENS name:", error)
+      }
+    }
+    resolveSafeENS()
+  }, [safeAddress])
+
+  // Resolve connected wallet address to ENS name
+  useEffect(() => {
+    async function resolveWalletENS() {
+      if (!isConnected || !address) {
+        setWalletEnsName(null)
+        return
+      }
+
+      try {
+        const response = await fetch(`/api/ens/resolve?address=${address}`)
+        const data = await response.json()
+        if (data.success && data.data.name) {
+          setWalletEnsName(data.data.name)
+        }
+      } catch (error) {
+        console.error("Failed to resolve wallet ENS name:", error)
+      }
+    }
+    resolveWalletENS()
+  }, [isConnected, address])
+
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch (error) {
+      console.error("Failed to copy:", error)
+    }
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -120,7 +192,7 @@ export default function SubmitPage() {
                         type="button"
                         className="px-4 py-2 border border-white text-white font-bold uppercase text-xs hover:bg-white hover:text-black transition-colors"
                       >
-                        {account.displayName}
+                        {walletEnsName || account.displayName}
                       </button>
                     )
                   })()}
@@ -146,6 +218,69 @@ export default function SubmitPage() {
         </p>
       </section>
 
+      {/* Curator Board Info */}
+      {safeAddress && (
+        <section className="max-w-3xl mx-auto px-8 md:px-12 pb-8">
+          <div className="border border-white p-6 md:p-8 bg-black">
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div>
+                <h3 className="text-xl font-bold uppercase mb-2 text-white">Curator Board</h3>
+                <p className="text-sm text-gray-400 mb-4">
+                  Submissions are reviewed by the Safe multisig curators below. Only Safe owners can approve or reject releases.
+                </p>
+              </div>
+              <Shield className="w-6 h-6 text-white flex-shrink-0 mt-1" />
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs uppercase text-gray-500 font-bold mb-2 block">
+                  Safe Address {safeEnsName && <span className="text-white">({safeEnsName})</span>}
+                </label>
+                <div className="flex items-center gap-2 bg-gray-900 border border-gray-700 p-3">
+                  <div className="flex-1">
+                    {safeEnsName ? (
+                      <div className="space-y-1">
+                        <div className="text-sm text-white font-semibold">{safeEnsName}</div>
+                        <code className="text-xs text-gray-400 font-mono break-all">
+                          {safeAddress}
+                        </code>
+                      </div>
+                    ) : (
+                      <code className="text-xs text-white font-mono break-all">
+                        {safeAddress}
+                      </code>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => copyToClipboard(safeAddress)}
+                    className="flex-shrink-0 p-2 hover:bg-gray-800 transition-colors"
+                    title="Copy address"
+                  >
+                    {copied ? (
+                      <Check className="w-4 h-4 text-green-400" />
+                    ) : (
+                      <Copy className="w-4 h-4 text-gray-400" />
+                    )}
+                  </button>
+                </div>
+              </div>
+              <div className="pt-3 border-t border-gray-800">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                  <div>
+                    <span className="text-white font-bold uppercase">Who Can Submit:</span>
+                    <p className="text-gray-400 mt-1">Anyone with a connected wallet can submit releases to this curator board.</p>
+                  </div>
+                  <div>
+                    <span className="text-white font-bold uppercase">Who Can Approve/Reject:</span>
+                    <p className="text-gray-400 mt-1">Only wallets that are owners of the Safe address above can approve or reject submissions.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
       <main className="max-w-3xl mx-auto p-8 md:p-12 pt-0">
         <div className="mb-12">
           <h2 className="text-3xl font-bold uppercase mb-4">Submit Release</h2>
@@ -153,6 +288,16 @@ export default function SubmitPage() {
             Fill out the manifest below to initialize a new release entry. All fields are required for on-chain
             verification.
           </p>
+          {safeAddress && (
+            <p className="text-xs text-gray-500 mt-2">
+              Your submission will be sent to the curator board at{' '}
+              {safeEnsName ? (
+                <span className="text-gray-400 font-semibold">{safeEnsName}</span>
+              ) : (
+                <code className="text-gray-400">{safeAddress.substring(0, 10)}...{safeAddress.substring(safeAddress.length - 8)}</code>
+              )}
+            </p>
+          )}
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-8">

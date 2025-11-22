@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS approvals (
   signer VARCHAR(42) NOT NULL,                   -- 0x curator address
   signature VARCHAR(200) NOT NULL,               -- 0x + 130 hex
   timestamp INT NOT NULL,                        -- Unix seconds
+  safeTxHash VARCHAR(66) NULL,                  -- Safe transaction hash (links approval to Safe tx)
   
   CONSTRAINT fk_approvals_release FOREIGN KEY (releaseId) REFERENCES releases(id) ON DELETE CASCADE
 );
@@ -78,6 +79,8 @@ CREATE TABLE IF NOT EXISTS approvals (
 -- Create indexes on approvals table
 CREATE INDEX IF NOT EXISTS idx_approvals_release_signer ON approvals(releaseId, signer);
 CREATE INDEX IF NOT EXISTS idx_approvals_timestamp ON approvals(timestamp);
+CREATE INDEX IF NOT EXISTS idx_approvals_safe_tx_hash ON approvals(safeTxHash);
+CREATE INDEX IF NOT EXISTS idx_approvals_release_safe_tx ON approvals(releaseId, safeTxHash);
 
 -- Audit Logs Table
 -- Tracks all actions taken on releases for compliance and debugging
@@ -162,6 +165,25 @@ CREATE TABLE IF NOT EXISTS temp_files (
 CREATE INDEX IF NOT EXISTS idx_temp_files_release_status ON temp_files(releaseId, status);
 CREATE INDEX IF NOT EXISTS idx_temp_files_expires ON temp_files(expiresAt);
 
+-- User Safes Table
+-- Maps wallet addresses to Safe addresses they own/use for curation
+-- Supports: one wallet can have multiple Safes, but one "active" Safe per wallet
+CREATE TABLE IF NOT EXISTS user_safes (
+  id SERIAL PRIMARY KEY,
+  wallet_address VARCHAR(42) NOT NULL,              -- User's wallet address (0x...)
+  safe_address VARCHAR(42) NOT NULL,                -- Safe contract address (0x...)
+  is_active BOOLEAN DEFAULT TRUE,                    -- Active Safe for this wallet
+  created_at INT NOT NULL,                           -- Unix seconds
+  updated_at INT NOT NULL,                           -- Unix seconds
+  
+  UNIQUE(wallet_address, safe_address)               -- Prevent duplicate links
+);
+
+-- Create indexes on user_safes table
+CREATE INDEX IF NOT EXISTS idx_user_safes_wallet ON user_safes(wallet_address);
+CREATE INDEX IF NOT EXISTS idx_user_safes_safe ON user_safes(safe_address);
+CREATE INDEX IF NOT EXISTS idx_user_safes_active ON user_safes(wallet_address, is_active) WHERE is_active = TRUE;
+
 -- ============================================================================
 -- SUMMARY
 -- ============================================================================
@@ -170,8 +192,10 @@ CREATE INDEX IF NOT EXISTS idx_temp_files_expires ON temp_files(expiresAt);
 -- 2. approvals - Multisig curator approvals
 -- 3. audit_logs - Complete audit trail of all actions
 -- 4. curators - Curator board management
--- 5. temporary_submissions - User-submitted metadata (pre-approval staging)
--- 6. temp_files - Temporary file content (BLOB) for curator review
+-- 5. curator_settings - Platform-wide curator settings (legacy/fallback)
+-- 6. temporary_submissions - User-submitted metadata (pre-approval staging)
+-- 7. temp_files - Temporary file content (BLOB) for curator review
+-- 8. user_safes - Dynamic Safe linking (wallet -> Safe mapping)
 --
 -- Data Flow:
 -- Submit → temporary_submissions + temp_files (with BLOB data)

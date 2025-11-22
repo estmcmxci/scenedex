@@ -86,6 +86,7 @@ export type Approval = {
   signer: string; // 0x wallet address of co-signer
   signature: string; // EIP-191 signature (0x + 130 hex chars)
   timestamp: number; // Unix timestamp when signed
+  safeTxHash?: string; // Safe transaction hash (for on-chain approvals)
 };
 
 // ============================================================================

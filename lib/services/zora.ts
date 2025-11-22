@@ -17,6 +17,7 @@ import {
   parseUnits,
   keccak256,
   encodePacked,
+  encodeFunctionData,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
@@ -290,5 +291,113 @@ export async function getCoinSymbol(
     console.error(`❌ Failed to get coin symbol:`, errorMessage);
     return null;
   }
+}
+
+// ============================================================================
+// SAFE TRANSACTION CALLDATA FUNCTIONS
+// These functions return calldata for Safe to execute (instead of executing directly)
+// ============================================================================
+
+/**
+ * Get calldata for creating a Zora coin
+ * Returns calldata that Safe can execute
+ * 
+ * @param releaseId - Release ID (e.g., "PDA-001")
+ * @param creatorAddress - Creator's wallet address (becomes coin owner)
+ * @param splitAddress - Split contract address (50% Safe + 50% Creator) - payoutRecipient
+ * @param metadataURI - IPFS URI pointing to coin metadata JSON
+ * @param title - Release title (used as coin name)
+ * @param metadataFilename - Metadata filename (default: 'metadata.json')
+ * @returns Calldata for deploy call on Zora coin factory
+ */
+export function getZoraCoinCalldata(
+  releaseId: string,
+  creatorAddress: Address,
+  splitAddress: Address,
+  metadataURI: string,
+  title: string,
+  metadataFilename: string = 'metadata.json',
+  coinSalt?: Hex
+): { to: string; data: string; value: string; salt: Hex } {
+  console.log(`\n📝 Preparing Zora coin creation calldata...`);
+  console.log(`   Release ID: ${releaseId}`);
+  console.log(`   Payout Recipient: ${splitAddress}`);
+  console.log(`   Metadata URI: ${metadataURI}\n`);
+
+  // Validate inputs
+  if (!splitAddress.startsWith('0x') || splitAddress.length !== 42) {
+    throw new Error(`Invalid split address: ${splitAddress}`);
+  }
+  if (!metadataURI.startsWith('ipfs://')) {
+    throw new Error(
+      `Invalid metadata URI. Must start with 'ipfs://': ${metadataURI}`
+    );
+  }
+  if (!title || title.length === 0) {
+    throw new Error('Release title required for coin name');
+  }
+
+  // Get factory address from env
+  const factoryAddress = process.env.ZORA_COIN_FACTORY_ADDRESS as Address;
+  if (!factoryAddress) {
+    throw new Error('ZORA_COIN_FACTORY_ADDRESS environment variable not set');
+  }
+
+  // Extract PDA number from release ID (PDA-001-xyz → PDA001)
+  const pdaNumber = releaseId.split('-')[1] || 'UNKNOWN';
+  const coinSymbol = `PDA${pdaNumber}`;
+
+  // Convert IPFS URI to w3s.link gateway URL
+  // Format: https://{cid}.ipfs.w3s.link/{releaseId}-{filename}
+  const metadataGatewayUrl = metadataURI.startsWith('ipfs://')
+    ? `https://${metadataURI.replace('ipfs://', '')}.ipfs.w3s.link/${releaseId}-${metadataFilename}`
+    : metadataURI;
+
+  // Generate pool config for ETH pair
+  const poolConfig = encodeMultiCurvePoolConfig({
+    currency: zeroAddress, // ETH (address(0))
+    tickLower: [-250000],
+    tickUpper: [-195000],
+    numDiscoveryPositions: [11],
+    maxDiscoverySupplyShare: [parseUnits('0.05', 18)], // 5% max supply share
+  });
+
+  // Generate unique salt (or use provided one)
+  const finalCoinSalt = coinSalt || keccak256(
+    encodePacked(
+      ['string', 'uint256'],
+      [releaseId, BigInt(Date.now())]
+    )
+  );
+
+  // Encode function call
+  const calldata = encodeFunctionData({
+    abi: coinFactoryABI,
+    functionName: 'deploy',
+    args: [
+      splitAddress,            // payoutRecipient (split contract)
+      [creatorAddress],        // owners (array)
+      metadataGatewayUrl,      // uri (HTTP gateway URL)
+      title,                   // name
+      coinSymbol,              // symbol
+      poolConfig,              // poolConfig (encoded bytes)
+      creatorAddress,          // platformReferrer
+      zeroAddress,             // postDeployHook
+      '0x',                    // postDeployHookData
+      finalCoinSalt,                // coinSalt
+    ],
+  });
+
+  console.log(`   ✅ Calldata prepared for deploy`);
+  console.log(`      To: ${factoryAddress}`);
+  console.log(`      Symbol: ${coinSymbol}`);
+  console.log(`      Data length: ${calldata.length} bytes`);
+
+  return {
+    to: factoryAddress,
+    data: calldata,
+    value: '0',
+    salt: finalCoinSalt,
+  };
 }
 

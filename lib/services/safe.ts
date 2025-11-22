@@ -92,14 +92,28 @@ export async function getApprovalThreshold(
 
 /**
  * Get Safe address from database
+ * 
+ * @param walletAddress - Optional wallet address to get user-specific Safe
+ * If provided, returns user's active Safe. Otherwise, falls back to global curator_settings.
  */
-export async function getSafeAddress(): Promise<string> {
+export async function getSafeAddress(walletAddress?: string): Promise<string> {
+  // If wallet address provided, try to get user-specific Safe first
+  if (walletAddress) {
+    const { getSafeForWallet } = await import('./user-safes')
+    const userSafe = await getSafeForWallet(walletAddress)
+    if (userSafe) {
+      return userSafe
+    }
+    // Fall through to global settings if no user Safe found
+  }
+
+  // Fallback to global curator_settings (for backward compatibility)
   const settings = await dbQuery(
     'SELECT safe_address FROM curator_settings LIMIT 1'
   )
 
   if (settings.rows.length === 0) {
-    throw new Error('No curator settings found')
+    throw new Error('No Safe address found. Please link a Safe to your wallet or configure curator_settings.')
   }
 
   return settings.rows[0].safe_address

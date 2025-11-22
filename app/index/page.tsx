@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { X, Play } from "lucide-react"
+import { Play } from "lucide-react"
 import Link from "next/link"
 import { cn } from "@/lib/utils"
 
@@ -9,19 +9,21 @@ interface Release {
   id: string
   artist: string
   description: string
-  categories: string[]
   title: string
   ensName: string
   coverImageUrl?: string
+  creatorAddress?: string | null
+  publisherAddress?: string | null
+  creatorEnsName?: string | null
+  publisherEnsName?: string | null
+  publishedAt?: number | null
 }
 
 export default function BrowsePage() {
   const [releases, setReleases] = useState<Release[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [showFilters, setShowFilters] = useState(true)
   const [searchQuery, setSearchQuery] = useState("")
-  const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
   const [sortBy, setSortBy] = useState<"az" | "newest">("az")
 
   // Fetch releases from ENS via API
@@ -36,27 +38,93 @@ export default function BrowsePage() {
           throw new Error(data.error || 'Failed to fetch releases')
         }
 
-        // Transform API data to UI format
-        const transformedReleases: Release[] = data.releases.map((release: any) => {
-          const releaseId = release.releaseId || release.ensName.split('.')[0].toUpperCase()
-          const coverCID = release.coverImageIPFSHash?.trim()
-          
-          const coverImageUrl = coverCID 
-            ? `https://${coverCID}.ipfs.w3s.link/${releaseId}-cover.jpg`
-            : undefined
+        // Transform API data to UI format and fetch metadata for publisher info
+        const transformedReleases: Release[] = await Promise.all(
+          data.releases.map(async (release: any) => {
+            const releaseId = release.releaseId || release.ensName.split('.')[0].toUpperCase()
+            const coverCID = release.coverImageIPFSHash?.trim()
+            
+            const coverImageUrl = coverCID 
+              ? `https://${coverCID}.ipfs.w3s.link/${releaseId}-cover.jpg`
+              : undefined
 
-          return {
-            id: releaseId,
-            artist: release.artists || 'Unknown Artist',
-            description: release.description || 'No description',
-            categories: ["Experimental"], // Default category for now
-            title: releaseId,
-            ensName: release.ensName,
-            coverImageUrl,
-          }
-        })
+            // Fetch publisher, publication date, and title from metadata JSON if available
+            let publisherAddress: string | null = null
+            let publishedAt: number | null = null
+            let trackTitle: string | null = null
+            if (release.metadataURI) {
+              try {
+                const metadataUrl = `https://${release.metadataURI}.ipfs.w3s.link/${releaseId}-metadata.json`
+                const metadataRes = await fetch(metadataUrl)
+                if (metadataRes.ok) {
+                  const metadata = await metadataRes.json()
+                  publisherAddress = metadata.properties?.publishedBy || null
+                  publishedAt = metadata.properties?.publishedAt || null
+                  trackTitle = metadata.name || null
+                }
+              } catch (err) {
+                // Metadata fetch failed, publisher/date/title unknown (old release)
+                console.log(`Could not fetch metadata for ${releaseId}:`, err)
+              }
+            }
+
+            return {
+              id: releaseId,
+              artist: release.artists || 'Unknown Artist',
+              description: release.description || 'No description',
+              title: trackTitle || releaseId,
+              ensName: release.ensName,
+              coverImageUrl,
+              creatorAddress: release.creatorAddress || null,
+              publisherAddress,
+              publishedAt,
+            }
+          })
+        )
 
         setReleases(transformedReleases)
+        
+        // Resolve ENS names for all addresses in parallel
+        const allAddresses = new Set<string>()
+        transformedReleases.forEach((release) => {
+          if (release.creatorAddress) allAddresses.add(release.creatorAddress.toLowerCase())
+          if (release.publisherAddress) allAddresses.add(release.publisherAddress.toLowerCase())
+        })
+
+        // Batch resolve all addresses
+        const ensResolutions = await Promise.all(
+          Array.from(allAddresses).map(async (address) => {
+            try {
+              const response = await fetch(`/api/ens/resolve?address=${address}`)
+              const data = await response.json()
+              return {
+                address: address.toLowerCase(),
+                name: data.success && data.data.name ? data.data.name : null,
+              }
+            } catch (error) {
+              return { address: address.toLowerCase(), name: null }
+            }
+          })
+        )
+
+        // Create a map of address -> ENS name
+        const ensMap = new Map<string, string | null>()
+        ensResolutions.forEach(({ address, name }) => {
+          ensMap.set(address, name)
+        })
+
+        // Update releases with ENS names
+        setReleases((prevReleases) =>
+          prevReleases.map((release) => ({
+            ...release,
+            creatorEnsName: release.creatorAddress
+              ? ensMap.get(release.creatorAddress.toLowerCase()) || null
+              : null,
+            publisherEnsName: release.publisherAddress
+              ? ensMap.get(release.publisherAddress.toLowerCase()) || null
+              : null,
+          }))
+        )
         setError(null)
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : 'Failed to load releases'
@@ -70,15 +138,12 @@ export default function BrowsePage() {
     fetchReleases()
   }, [])
 
-  const allCategories = Array.from(new Set(releases.flatMap((r) => r.categories))).sort()
-
   const filteredReleases = releases
     .filter((release) => {
       const matchesSearch =
         release.artist.toLowerCase().includes(searchQuery.toLowerCase()) ||
         release.title.toLowerCase().includes(searchQuery.toLowerCase())
-      const matchesCategory = selectedCategory ? release.categories.includes(selectedCategory) : true
-      return matchesSearch && matchesCategory
+      return matchesSearch
     })
     .sort((a, b) => {
       if (sortBy === "az") return a.artist.localeCompare(b.artist)
@@ -98,14 +163,6 @@ export default function BrowsePage() {
           </Link>
 
           <div className="flex flex-col md:flex-row gap-4 md:items-center w-full md:w-auto">
-            <button
-              onClick={() => setShowFilters(!showFilters)}
-              className="flex items-center gap-2 hover:text-muted-foreground transition-colors uppercase text-xs font-bold"
-            >
-              {showFilters ? <X className="w-3 h-3" /> : null}
-              {showFilters ? "Hide Filters" : "Show Filters"}
-            </button>
-
             <div className="relative group flex-1 md:w-64">
               <input
                 type="text"
@@ -140,43 +197,6 @@ export default function BrowsePage() {
           </div>
         </div>
 
-        {/* Filters Section */}
-        {showFilters && (
-          <div className="border-t border-border p-4 animate-in slide-in-from-top-2 duration-200">
-            <div className="mb-4">
-              <h3 className="text-xs font-bold text-muted-foreground mb-3 uppercase">Categories</h3>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={() => setSelectedCategory(null)}
-                  className={cn(
-                    "px-3 py-1 border rounded-full text-xs transition-all",
-                    selectedCategory === null
-                      ? "bg-foreground text-background border-foreground"
-                      : "border-border hover:border-foreground",
-                  )}
-                >
-                  All
-                </button>
-                {allCategories.map((category) => (
-                  <button
-                    key={category}
-                    onClick={() => setSelectedCategory(category === selectedCategory ? null : category)}
-                    className={cn(
-                      "px-3 py-1 border rounded-full text-xs transition-all",
-                      selectedCategory === category
-                        ? "bg-foreground text-background border-foreground"
-                        : "border-border hover:border-foreground",
-                    )}
-                  >
-                    {category}
-                  </button>
-                ))}
-              </div>
-
-            </div>
-
-          </div>
-        )}
       </header>
 
       {/* Loading State */}
@@ -195,46 +215,103 @@ export default function BrowsePage() {
         </div>
       )}
 
-      {/* Table Header */}
-      {!loading && !error && (
+          {/* Table Header */}
+          {!loading && !error && (
         <>
-          <div className="grid grid-cols-12 gap-4 px-4 py-3 border-b border-border text-xs font-bold text-muted-foreground uppercase tracking-wider sticky top-[header-height]">
-            <div className="col-span-4 md:col-span-3">Artist</div>
-            <div className="col-span-3 md:col-span-3 hidden md:block">Description</div>
-            <div className="col-span-4 md:col-span-4">Categories</div>
-            <div className="col-span-4 md:col-span-2 text-right">Play</div>
+          <div className="grid grid-cols-12 gap-4 px-4 py-3 border-b border-border text-xs font-bold text-muted-foreground uppercase tracking-wider">
+            <div className="col-span-3 md:col-span-1">Artist</div>
+            <div className="col-span-2 md:col-span-2">Title</div>
+            <div className="col-span-2 md:col-span-1">ID</div>
+            <div className="col-span-0 md:col-span-2 hidden md:block">Description</div>
+            <div className="col-span-0 md:col-span-1 hidden md:block">Date</div>
+            <div className="col-span-0 md:col-span-2 hidden md:block">Creator</div>
+            <div className="col-span-0 md:col-span-2 hidden md:block">Publisher</div>
+            <div className="col-span-5 md:col-span-1 text-right">Play</div>
           </div>
 
           {/* List View */}
           <div className="divide-y divide-border">
             {filteredReleases.map((release) => (
-          <div
+          <Link
             key={release.id}
-            className="group grid grid-cols-12 gap-4 px-4 py-4 items-center hover:bg-secondary/50 transition-colors"
+            href={`/index/${release.ensName}`}
+            className="group grid grid-cols-12 gap-4 px-4 py-4 items-center hover:bg-secondary/50 transition-colors cursor-pointer"
           >
-            <div className="col-span-4 md:col-span-3">
+            <div className="col-span-3 md:col-span-1">
               <div className="font-bold text-base">{release.artist}</div>
             </div>
 
-            <div className="col-span-3 md:col-span-3 hidden md:block text-muted-foreground text-sm">{release.description}</div>
-
-            <div className="col-span-4 md:col-span-4 flex flex-wrap gap-1.5">
-              {release.categories.map((cat) => (
-                <span
-                  key={cat}
-                  className="px-2 py-0.5 border border-border rounded-full text-[10px] uppercase tracking-wide"
-                >
-                  {cat}
-                </span>
-              ))}
+            <div className="col-span-2 md:col-span-2">
+              <div className="text-sm">{release.title}</div>
             </div>
 
-            <div className="col-span-4 md:col-span-2 flex justify-end gap-3 text-muted-foreground">
-              <Link href={`/index/${release.ensName}`} className="hover:text-foreground transition-colors">
-                <Play className="w-4 h-4" />
-              </Link>
+            <div className="col-span-2 md:col-span-1">
+              <div className="font-mono text-xs text-muted-foreground">{release.id}</div>
             </div>
-          </div>
+
+            <div className="col-span-0 md:col-span-2 hidden md:block text-muted-foreground text-sm">{release.description}</div>
+
+            <div className="col-span-0 md:col-span-1 hidden md:block text-xs text-muted-foreground">
+              {release.publishedAt ? (
+                <div>{new Date(release.publishedAt).toLocaleDateString()}</div>
+              ) : (
+                <span className="italic">N/A</span>
+              )}
+            </div>
+
+            <div className="col-span-0 md:col-span-2 hidden md:block text-xs">
+              {release.creatorAddress ? (
+                <div>
+                  {release.creatorEnsName ? (
+                    <div className="font-semibold">{release.creatorEnsName}</div>
+                  ) : (
+                    <div className="font-mono text-[10px] text-muted-foreground">
+                      {release.creatorAddress.substring(0, 6)}...{release.creatorAddress.substring(release.creatorAddress.length - 4)}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <span className="text-muted-foreground">Unknown</span>
+              )}
+            </div>
+
+            <div className="col-span-0 md:col-span-2 hidden md:block text-xs">
+              {release.publisherAddress ? (
+                <div>
+                  {release.publisherEnsName ? (
+                    <div className="font-semibold">{release.publisherEnsName}</div>
+                  ) : (
+                    <div className="font-mono text-[10px] text-muted-foreground">
+                      {release.publisherAddress.substring(0, 6)}...{release.publisherAddress.substring(release.publisherAddress.length - 4)}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <span className="text-muted-foreground italic">N/A</span>
+              )}
+            </div>
+
+            <div className="col-span-5 md:col-span-1 flex justify-end items-center">
+              <div className="relative" onClick={(e) => e.stopPropagation()}>
+                {release.coverImageUrl ? (
+                  <div className="relative w-12 h-12">
+                    <img
+                      src={release.coverImageUrl}
+                      alt={release.title}
+                      className="w-12 h-12 object-cover border border-border"
+                    />
+                    <div className="absolute inset-0 bg-black/40 group-hover:bg-black/60 transition-colors flex items-center justify-center">
+                      <Play className="w-5 h-5 text-white" />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="relative w-12 h-12 border border-border bg-muted flex items-center justify-center group-hover:bg-muted/80 transition-colors">
+                    <Play className="w-5 h-5 text-muted-foreground" />
+                  </div>
+                )}
+              </div>
+            </div>
+          </Link>
         ))}
 
             {filteredReleases.length === 0 && (
