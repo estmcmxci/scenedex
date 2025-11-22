@@ -4,7 +4,7 @@ import { useState, useEffect } from "react"
 import Link from "next/link"
 import { ConnectButton } from "@rainbow-me/rainbowkit"
 import { useAccount, useSignMessage } from "wagmi"
-import { AudioPlayer } from "@/components/audio-player"
+import { AudioPlayer } from "@/app/components/audio-player"
 
 export default function CuratorDashboardPage() {
   const [releases, setReleases] = useState<any[]>([])

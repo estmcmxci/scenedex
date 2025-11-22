@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react"
 import { useParams } from "next/navigation"
 import Link from "next/link"
-import { AudioPlayer } from "@/components/audio-player"
+import { AudioPlayer } from "@/app/components/audio-player"
 
 interface ReleaseData {
   releaseId: string
