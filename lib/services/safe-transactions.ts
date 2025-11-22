@@ -25,7 +25,7 @@ import type {
   TransactionResult 
 } from '@safe-global/types-kit'
 import { ethers } from 'ethers'
-import { baseSepolia } from 'viem/chains'
+import { sepolia } from 'viem/chains'
 
 // Get Safe address from env (try SAFE_ADDRESS first, fallback to CURATOR_SAFE_ADDRESS for compatibility)
 const SAFE_ADDRESS = (process.env.SAFE_ADDRESS || process.env.CURATOR_SAFE_ADDRESS)!
@@ -33,16 +33,16 @@ const SAFE_ADDRESS = (process.env.SAFE_ADDRESS || process.env.CURATOR_SAFE_ADDRE
 // Initialize Safe Protocol Kit (lazy initialization)
 let protocolKit: Safe | null = null
 
-// Initialize Safe API Kit for Base Sepolia
+// Initialize Safe API Kit
 const apiKit = new SafeApiKit({
-  chainId: BigInt(baseSepolia.id), // 84532
+  chainId: BigInt(sepolia.id),
   apiKey: process.env.SAFE_API_KEY!,
 })
 
-// Initialize coordinator signer for signing messages (Base Sepolia)
+// Initialize coordinator signer for signing messages
 const coordinatorSigner = new ethers.Wallet(
   process.env.CURATOR_PRIVATE_KEY!,
-  new ethers.JsonRpcProvider(process.env.BASE_RPC_URL!)
+  new ethers.JsonRpcProvider(process.env.SEPOLIA_RPC_URL!)
 )
 
 // Log the derived address for debugging
@@ -61,9 +61,9 @@ async function getProtocolKit(): Promise<Safe> {
     console.log(`🔍 Coordinator signer address: ${coordinatorSigner.address}`)
     console.log(`🔍 Signers match: ${tempSigner.address.toLowerCase() === coordinatorSigner.address.toLowerCase()}`)
     
-    // Use the same signer instance to ensure consistency (Base Sepolia)
+    // Use the same signer instance to ensure consistency
     protocolKit = await Safe.init({
-      provider: process.env.BASE_RPC_URL!, // Base Sepolia RPC
+      provider: process.env.SEPOLIA_RPC_URL!,
       signer: coordinatorSigner.privateKey, // Use the same private key as coordinatorSigner
       safeAddress: SAFE_ADDRESS,
     })
