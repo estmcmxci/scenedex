@@ -1,0 +1,40 @@
+[
+  {
+    "id": "rel-001",
+    "title": "The Start of Something",
+    "description": "Debut album release featuring fresh indie sounds.",
+    "artists": ["Indie Starter", "Folk Friend"],
+    "releaseDate": "2024-04-05",
+    "files": [
+      {
+        "type": "audio",
+        "format": "mp3",
+        "url": "https://mock-storage/releases/rel-001/audio/main.mp3"
+      },
+      {
+        "type": "cover",
+        "format": "jpg",
+        "url": "https://mock-storage/releases/rel-001/cover.jpg"
+      }
+    ]
+  },
+  {
+    "id": "rel-002",
+    "title": "Night Grooves",
+    "description": "A collection of deep house tracks for late-night sessions.",
+    "artists": ["DJ Sleepless"],
+    "releaseDate": "2024-05-16",
+    "files": [
+      {
+        "type": "audio",
+        "format": "flac",
+        "url": "https://mock-storage/releases/rel-002/audio/main.flac"
+      },
+      {
+        "type": "cover",
+        "format": "png",
+        "url": "https://mock-storage/releases/rel-002/cover.png"
+      }
+    ]
+  }
+]

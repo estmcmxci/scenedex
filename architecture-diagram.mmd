@@ -1,0 +1,75 @@
+```mermaid
+flowchart TD
+    subgraph Frontend ["🖥️ FRONTEND (Next.js React)"]
+        Form["📝 ReleaseForm.tsx<br/>(submit)"]
+        Dashboard["👨‍⚖️ CuratorDashboard.tsx<br/>(approve)"]
+        Display["🎵 ReleaseDisplay.tsx<br/>(view)"]
+    end
+    
+    subgraph Backend ["⚙️ BACKEND (Node.js)"]
+        SubmitAPI["POST /api/submit"]
+        ApproveAPI["POST /api/approve"]
+        QueryAPI["GET /api/releases"]
+    end
+    
+    subgraph Wallet ["👛 WALLET (Wagmi)"]
+        SignMsg["signMessage()"]
+        SendTx["sendTransaction()"]
+    end
+    
+    subgraph Database ["💾 POSTGRESQL<br/>(Transactional & Queryable)"]
+        Releases["🎵 releases table"]
+        Approvals["✅ approvals table"]
+        Curators["👨‍⚖️ curators table"]
+        AuditLog["📋 audit_log table"]
+    end
+    
+    subgraph IPFS ["🌐 IPFS / STORACHA<br/>(Immutable & Distributed)"]
+        AudioFile["🎧 Audio files"]
+        Images["🖼️ Images"]
+        Metadata["📄 Metadata JSON<br/>(CIDs only)"]
+    end
+    
+    subgraph Ethereum ["⛓️ ETHEREUM L1<br/>(Governance & Trustless)"]
+        Factory["🏭 Factory Contract<br/>(Multisig)"]
+    end
+    
+    subgraph BaseL2 ["⛓️ BASE L2<br/>(Ownership & NFT)"]
+        Zora["🎨 Zora NFT<br/>Minting Service"]
+    end
+    
+    Form -->|POST| SubmitAPI
+    Dashboard -->|POST| ApproveAPI
+    Display -->|GET| QueryAPI
+    
+    Dashboard -->|signMessage| SignMsg
+    ApproveAPI -->|verify| SignMsg
+    Dashboard -->|sendTx| SendTx
+    
+    SubmitAPI -->|read/write| Releases
+    SubmitAPI -->|read/write| AuditLog
+    ApproveAPI -->|read/write| Approvals
+    ApproveAPI -->|read| Curators
+    QueryAPI -->|read| Releases
+    QueryAPI -->|read| Approvals
+    
+    SubmitAPI -->|pin| AudioFile
+    SubmitAPI -->|pin| Images
+    ApproveAPI -->|pin| Metadata
+    
+    ApproveAPI -->|call| Factory
+    Factory -->|mint| Zora
+    
+    QueryAPI -->|read| AudioFile
+    QueryAPI -->|read| Metadata
+    Display -->|stream| AudioFile
+    Display -->|link to| Zora
+    
+    style Frontend fill:#E0F0FF
+    style Backend fill:#F0E0FF
+    style Wallet fill:#FFF0E0
+    style Database fill:#E0FFE0
+    style IPFS fill:#FFFFE0
+    style Ethereum fill:#FFE0E0
+    style BaseL2 fill:#E0FFE0
+
