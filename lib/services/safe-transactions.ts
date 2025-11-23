@@ -394,7 +394,8 @@ export async function createAndExecuteSafeTransaction(
       console.log(`   📋 signHash() signature.data: ${signatureData ? signatureData.substring(0, 20) + '...' : 'null'}`)
     } else if (typeof hashSignature === 'string') {
       signatureData = hashSignature
-      console.log(`   📋 signHash() signature (string): ${signatureData.substring(0, 20)}...`)
+      const sigString: string = signatureData
+      console.log(`   📋 signHash() signature (string): ${sigString.substring(0, 20)}...`)
     }
     
     if (signatureData) {

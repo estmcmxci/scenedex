@@ -347,6 +347,29 @@ SAFE_API_KEY=<same-key-should-work-for-base-sepolia>
 - Document all contract addresses and ABIs
 - Consider creating a migration branch for this work
 
+### Basename Reverse Resolution Limitation
+
+**Issue**: Setting reverse records (address → name) for Safe addresses requires authorization. The curator address cannot directly set reverse records for the Safe address because:
+- `ReverseRegistrar.setNameForAddr()` requires the caller to be authorized for the target address
+- Safe contracts don't implement `Ownable` in a way that returns individual owners
+- Authorization check fails: `_ownsContract()` returns false
+
+**Solution**: Batch reverse record setting with Safe operations
+- Create a helper function that generates Safe transaction calldata for `ReverseRegistrar.setNameForAddr()`
+- Include it in the same Safe transaction batch when the Safe performs other operations (e.g., publishing)
+- This way, it's one Safe signature for multiple operations (Split + Zora + Basename + Reverse Record)
+
+**Implementation Plan**:
+1. Create `getReverseRecordCalldata()` function that returns the encoded calldata for `setNameForAddr()`
+2. Add it to the Safe transaction batch in `publishReleaseViaSafe()` or similar
+3. When Safe executes the batch, it will set the reverse record as part of the same transaction
+4. No additional user signature required - it's part of the existing Safe transaction
+
+**Current Status**: 
+- ✅ Forward resolution works (basename → Safe address)
+- ❌ Reverse resolution fails during registration (authorization error)
+- ⏳ Needs to be implemented as part of Safe transaction batching
+
 ---
 
 ## Questions to Answer Before Starting
