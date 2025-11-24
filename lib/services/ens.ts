@@ -4,14 +4,17 @@ dotenv.config({ path: '.env.local' });
 import { namehash, normalize } from 'viem/ens';
 import { encodeAbiParameters, encodeFunctionData, createPublicClient, createWalletClient, http, Hex, keccak256, zeroAddress, toBytes, encodePacked, Address } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { sepolia } from 'viem/chains';
+import { baseSepolia } from 'viem/chains';
 import type { Release } from '../types';
 
 // Config
-const ENS_DOMAIN = process.env.ENS_DOMAIN || 'scenedex.eth';
-const ENS_RESOLVER = process.env.ENS_RESOLVER_SEPOLIA!;
+const PARENT_DOMAIN = process.env.ENS_DOMAIN || 'scenius.basetest.eth';
+const PARENT_NODE = (process.env.ENS_PARENT_NODE as `0x${string}`) || namehash(PARENT_DOMAIN);
+const RESOLVER = process.env.BASENAMES_UPGRADEABLE_RESOLVER_BASE_SEPOLIA!;
+const REGISTRAR_CONTROLLER = process.env.BASENAMES_UPGRADEABLE_CONTROLLER_BASE_SEPOLIA!;
+const REVERSE_REGISTRAR = process.env.BASENAMES_REVERSE_REGISTRAR_BASE_SEPOLIA!;
 const ENS_SERVICE_NAMESPACE = process.env.ENS_SERVICE_NAMESPACE || 'eth.scenedex';
-const ENS_SUBNAME_PREFIX = process.env.ENS_SUBNAME_PREFIX || 'SOMA'; // Configurable prefix (e.g., SOMA, EROS)
+const ENS_SUBNAME_PREFIX = process.env.ENS_SUBNAME_PREFIX || 'EROS'; // Configurable prefix (e.g., SOMA, EROS)
 
 // DEBUG: Log what prefix is actually being used
 console.log(`🔍 ENS DEBUG: ENS_SUBNAME_PREFIX loaded as "${ENS_SUBNAME_PREFIX}" from env: "${process.env.ENS_SUBNAME_PREFIX}"`)
@@ -26,74 +29,65 @@ function getNamehash(name: string): `0x${string}` {
 }
 
 /**
- * Check if subname already exists on NameWrapper
- * Returns true if subname is owned (not 0x0 address)
+ * Check if basename is available on Basenames
+ * Returns true if basename is available (not registered)
  */
 export async function checkSubnameExists(
-  subnameNode: string,
-  nameWrapperAddress: string = '0x0635513f179D50A207757E05759CbD106d7dFcE8'
+  label: string
 ): Promise<boolean> {
-  const rpcUrl = process.env.SEPOLIA_RPC_URL || 'https://sepolia.infura.io/v3/' + process.env.INFURA_KEY;
+  const rpcUrl = process.env.BASE_RPC_URL!;
 
   const publicClient = createPublicClient({
-    chain: sepolia,
+    chain: baseSepolia,
     transport: http(rpcUrl),
   });
 
-  const NAMEWRAPPER_ABI = [
+  const REGISTRAR_CONTROLLER_ABI = [
     {
-      name: 'ownerOf',
+      name: 'available',
       type: 'function',
-      inputs: [{ name: 'id', type: 'uint256' }],
-      outputs: [{ name: 'owner', type: 'address' }],
+      inputs: [{ name: 'name', type: 'string' }],
+      outputs: [{ type: 'bool' }],
       stateMutability: 'view',
     },
-  ];
+  ] as const;
 
   try {
-    const tokenId = BigInt(subnameNode);
-    console.log(`      🔍 Checking NameWrapper.ownerOf(${tokenId.toString().substring(0, 20)}...)`);
+    const normalizedLabel = normalize(label);
+    console.log(`      🔍 Checking Basenames availability for "${normalizedLabel}"...`);
     
-    const owner = (await publicClient.readContract({
-      address: nameWrapperAddress as `0x${string}`,
-      abi: NAMEWRAPPER_ABI,
-      functionName: 'ownerOf',
-      args: [tokenId],
-    })) as `0x${string}`;
+    const isAvailable = await publicClient.readContract({
+      address: REGISTRAR_CONTROLLER,
+      abi: REGISTRAR_CONTROLLER_ABI,
+      functionName: 'available',
+      args: [normalizedLabel],
+    });
 
-    console.log(`      📊 NameWrapper owner: ${owner}`);
+    console.log(`      📊 Basenames available: ${isAvailable}`);
 
-    // If owner is zero address, subname does NOT exist
-    if (owner === '0x0000000000000000000000000000000000000000') {
-      console.log(`      ✅ Zero address - subname does NOT exist`);
-      return false;
-    }
-    console.log(`      ⚠️  Non-zero owner - subname EXISTS`);
-    return true;
+    // If available, subname does NOT exist (inverse logic for compatibility)
+    return !isAvailable;
   } catch (error) {
-    // ownerOf reverted = subname doesn't exist
-    console.log(`      ⚠️  ownerOf() reverted - assuming subname does NOT exist`);
+    // available() reverted = assume name doesn't exist (available)
+    console.log(`      ⚠️  available() reverted - assuming subname does NOT exist`);
     console.log(`      Error: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   }
 }
 
 /**
- * Get next available EROS number by checking resolver
+ * Get next available EROS number by checking Basenames availability
  */
 export async function getNextEROSNumber(): Promise<number> {
-  const rpcUrl = process.env.SEPOLIA_RPC_URL || 'https://sepolia.infura.io/v3/' + process.env.INFURA_KEY;
-  const ensResolver = process.env.ENS_RESOLVER_SEPOLIA as `0x${string}`;
-  const ensDomain = process.env.ENS_DOMAIN || 'scenedex.eth';
-  const ensServiceNamespace = process.env.ENS_SERVICE_NAMESPACE || 'eth.scenedex';
+  const rpcUrl = process.env.BASE_RPC_URL!;
 
   const publicClient = createPublicClient({
-    chain: sepolia,
+    chain: baseSepolia,
     transport: http(rpcUrl),
   });
   
-  console.log(`   Domain: ${ensDomain}`);
-  console.log(`   Resolver: ${ensResolver}`);
+  console.log(`   Domain: ${PARENT_DOMAIN}`);
+  console.log(`   Resolver: ${RESOLVER}`);
 
   // Resolver ABI for reading addr records
   const RESOLVER_ABI = [
@@ -111,69 +105,87 @@ export async function getNextEROSNumber(): Promise<number> {
   
   console.log(`\n🔍 Checking for next available ${ENS_SUBNAME_PREFIX} number...`);
   
+  const REGISTRY_ADDRESS = '0x1493b2567056c2181630115660963E13A8E32735' as `0x${string}`;
+  
   while (nextNumber <= maxAttempts) {
     const subnameLabel = `${ENS_SUBNAME_PREFIX}${String(nextNumber).padStart(3, '0')}`;
-    const fullSubname = `${subnameLabel}.${ensDomain}`;
-    const subnameNode = getNamehash(fullSubname); // This is the normalized (correct) node
-    
-    // Also calculate the "legacy" node that would have been created with uppercase label
-    // This catches ghost nodes from before we fixed normalization
-    const parentNode = getNamehash(ensDomain);
-    const legacyNode = keccak256(encodePacked(['bytes32', 'bytes32'], [parentNode as `0x${string}`, keccak256(toBytes(subnameLabel))]));
+    const normalizedLabel = normalize(subnameLabel);
+    const fullSubname = `${normalizedLabel}.${PARENT_DOMAIN}`;
+    const subnameNode = namehash(fullSubname);
 
     try {
-      // Check resolver's addr record (normalized node)
-      console.log(`   Checking ${subnameLabel} (normalized node: ${subnameNode.substring(0, 20)}...)`);
-      console.log(`      Resolver: ${ensResolver}`);
+      // Check Registry directly first (catches both RegistrarController and direct registrations)
+      console.log(`   Checking ${subnameLabel} availability...`);
       
-      const addr = await publicClient.readContract({
-        address: ensResolver,
-        abi: RESOLVER_ABI,
-        functionName: 'addr',
+      const REGISTRY_ABI = [
+        {
+          name: 'owner',
+          type: 'function',
+          stateMutability: 'view',
+          inputs: [{ name: 'node', type: 'bytes32' }],
+          outputs: [{ type: 'address' }],
+        },
+      ] as const;
+      
+      const owner = await publicClient.readContract({
+        address: REGISTRY_ADDRESS,
+        abi: REGISTRY_ABI,
+        functionName: 'owner',
         args: [subnameNode],
       });
 
-      console.log(`      addr = ${addr} (zeroAddress = ${addr === zeroAddress})`);
-
-      if (addr === zeroAddress) {
-        // Check if normalized version exists in NameWrapper
-        const nameWrapperAddress = process.env.ENS_NAMEWRAPPER_SEPOLIA || '0x0635513f179D50A207757E05759CbD106d7dFcE8';
-        const existsNormalized = await checkSubnameExists(subnameNode, nameWrapperAddress);
-        
-        if (existsNormalized) {
-          console.log(`   ⚠️  ${subnameLabel} exists in NameWrapper (normalized) - skipping`);
-          nextNumber++;
-          continue;
-        }
-        
-        // ALSO check if legacy uppercase version exists (ghost node from before normalization fix)
-        const existsLegacy = await checkSubnameExists(legacyNode, nameWrapperAddress);
-        
-        if (existsLegacy) {
-          console.log(`   ⚠️  ${subnameLabel} exists as legacy uppercase ghost node - skipping`);
-          nextNumber++;
-          continue;
-        }
-        
+      // If owner is zero address, subname doesn't exist (available)
+      if (owner === '0x0000000000000000000000000000000000000000') {
+        console.log(`      Available: true (not in Registry)`);
         console.log(`   ✅ ${subnameLabel} is available!\n`);
         return nextNumber;
-      }
-    } catch (error) {
-      // If reading addr fails, check NameWrapper for both versions before returning
-      const nameWrapperAddress = process.env.ENS_NAMEWRAPPER_SEPOLIA || '0x0635513f179D50A207757E05759CbD106d7dFcE8';
-      const existsNormalized = await checkSubnameExists(subnameNode, nameWrapperAddress);
-      const existsLegacy = await checkSubnameExists(legacyNode, nameWrapperAddress);
-      
-      if (existsNormalized || existsLegacy) {
-        console.log(`   ${subnameLabel}: exists in NameWrapper (${existsNormalized ? 'normalized' : 'legacy'}) - skipping`);
+      } else {
+        console.log(`      Available: false (owner: ${owner})`);
+        console.log(`   ⚠️  ${subnameLabel} is already registered - skipping`);
         nextNumber++;
         continue;
       }
+    } catch (error) {
+      // If Registry check fails, fall back to RegistrarController check
+      console.log(`   ⚠️  Registry check failed, trying RegistrarController...`);
+      console.log(`      Error: ${error instanceof Error ? error.message : String(error)}`);
       
-      console.log(`   ✅ ${subnameLabel} is available!\n`);
-      return nextNumber;
+      try {
+        const REGISTRAR_CONTROLLER_ABI = [
+          {
+            name: 'available',
+            type: 'function',
+            inputs: [{ name: 'name', type: 'string' }],
+            outputs: [{ type: 'bool' }],
+            stateMutability: 'view',
+          },
+        ] as const;
+        
+        const isAvailable = await publicClient.readContract({
+          address: REGISTRAR_CONTROLLER,
+          abi: REGISTRAR_CONTROLLER_ABI,
+          functionName: 'available',
+          args: [normalizedLabel],
+        });
+
+        console.log(`      RegistrarController available: ${isAvailable}`);
+          
+        if (isAvailable) {
+          console.log(`   ✅ ${subnameLabel} is available!\n`);
+          return nextNumber;
+        } else {
+          console.log(`   ⚠️  ${subnameLabel} is already registered - skipping`);
+          nextNumber++;
+          continue;
+        }
+      } catch (fallbackError) {
+        // If both checks fail, assume name is available (conservative approach)
+        console.log(`   ⚠️  Both checks failed for ${subnameLabel}, assuming available`);
+        console.log(`      Fallback error: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`);
+        console.log(`   ✅ ${subnameLabel} is available!\n`);
+        return nextNumber;
+      }
     }
-    nextNumber++;
   }
   
   throw new Error(`Could not find available ${ENS_SUBNAME_PREFIX} number after ${maxAttempts} attempts`);
@@ -241,7 +253,7 @@ export function buildSetTextTransactions(
   ];
 
   return Object.entries(records).map(([key, value]) => ({
-    to: ENS_RESOLVER,
+    to: RESOLVER,
     value: '0',
     // Use encodeFunctionData to get complete call data (selector + params)
     data: encodeFunctionData({
@@ -287,13 +299,11 @@ export async function registerEROSRelease(
   const subnameLabel = formatEROSNumber(finalErosNumber);
   console.log(`🔍 Generated subnameLabel: "${subnameLabel}" (from erosNumber=${finalErosNumber}${erosNumber !== undefined ? ' [pre-allocated]' : ' [newly allocated]'})`);
   
-  // Load ENS_DOMAIN at function level to ensure .env is loaded
-  const ensDomain = process.env.ENS_DOMAIN || 'scenedex.eth';
-  const fullSubname = `${subnameLabel}.${ensDomain}`;
+  const fullSubname = `${subnameLabel}.${PARENT_DOMAIN}`;
 
   // Calculate subname node (with normalization)
   const subnameNode = getNamehash(fullSubname);
-  console.log(`🔍 DEBUG: subnameLabel="${subnameLabel}", ensDomain="${ensDomain}", fullSubname="${fullSubname}"`);
+  console.log(`🔍 DEBUG: subnameLabel="${subnameLabel}", parentDomain="${PARENT_DOMAIN}", fullSubname="${fullSubname}"`);
   console.log(`   Subname: ${fullSubname}`);
   console.log(`   Node: ${subnameNode}`);
 
@@ -318,19 +328,25 @@ export async function registerEROSRelease(
 
 /**
  * Approve operator on NameWrapper for future subname management
+ * @deprecated This function is for ENS NameWrapper which doesn't exist in Basenames.
+ * Basenames uses BaseRegistrar (ERC721) which uses standard ERC721 approval methods.
+ * This function is kept for backward compatibility but may not work with Basenames.
  */
 export async function approveOperatorOnNameWrapper(
   operatorAddress: string
 ): Promise<string> {
   console.log(`\n🔐 Approving operator on NameWrapper...`);
+  console.log(`   ⚠️  WARNING: This function is for ENS NameWrapper, not Basenames`);
 
-  const rpcUrl = process.env.SEPOLIA_RPC_URL || 'https://sepolia.infura.io/v3/' + process.env.INFURA_KEY;
+  const rpcUrl = process.env.BASE_RPC_URL!;
   const privateKey = process.env.CURATOR_PRIVATE_KEY;
 
   if (!privateKey) {
     throw new Error('CURATOR_PRIVATE_KEY not set in .env.local');
   }
 
+  // Note: Basenames doesn't have NameWrapper, uses BaseRegistrar instead
+  // This address is kept for compatibility but may not work
   const NAMEWRAPPER_ADDRESS = (process.env.ENS_NAMEWRAPPER_SEPOLIA || '0x0635513f179D50A207757E05759CbD106d7dFcE8') as `0x${string}`;
 
   const APPROVAL_ABI = [
@@ -345,14 +361,14 @@ export async function approveOperatorOnNameWrapper(
   ];
 
   const publicClient = createPublicClient({
-    chain: sepolia,
+    chain: baseSepolia,
     transport: http(rpcUrl),
   });
 
   const account = privateKeyToAccount(privateKey as Hex);
   const walletClient = createWalletClient({
     account,
-    chain: sepolia,
+    chain: baseSepolia,
     transport: http(rpcUrl),
   });
 
@@ -382,109 +398,119 @@ export async function approveOperatorOnNameWrapper(
 }
 
 /**
- * Create ENS subname via NameWrapper on Sepolia L1
- * Uses single setSubnodeRecord call to create subname with resolver in one transaction
- * 
- * Important: Expiry must be a valid future timestamp (not 0), otherwise the resolver
- * will not be properly registered in the ENS Registry.
+ * Create Basename via RegistrarController on Base Sepolia
+ * Uses RegistrarController.register() to create basename with resolver in one transaction
  *
- * @param subnameLabel - e.g., "SOMA001" or "EROS001" (from ENS_SUBNAME_PREFIX env var)
- * @param parentNode - Namehash of parent domain (e.g., scenedex.eth)
+ * @param subnameLabel - e.g., "EROS001" (from ENS_SUBNAME_PREFIX env var)
+ * @param parentNode - Namehash of parent domain (e.g., scenius.basetest.eth) - unused but kept for compatibility
  * @returns Transaction hash
  */
 export async function createENSSubname(
   subnameLabel: string,
   parentNode: string
 ): Promise<string> {
-  console.log(`\n📝 Creating ENS subname via NameWrapper (single setSubnodeRecord call)...`);
+  console.log(`\n📝 Creating Basename via RegistrarController on Base Sepolia...`);
 
-  const rpcUrl = process.env.SEPOLIA_RPC_URL || 'https://sepolia.infura.io/v3/' + process.env.INFURA_KEY;
+  const rpcUrl = process.env.BASE_RPC_URL!;
   const privateKey = process.env.CURATOR_PRIVATE_KEY;
 
   if (!privateKey) {
     throw new Error('CURATOR_PRIVATE_KEY not set in .env.local');
   }
 
-  // NameWrapper contract address on Sepolia
-  const NAMEWRAPPER_ADDRESS = (process.env.ENS_NAMEWRAPPER_SEPOLIA || '0x0635513f179D50A207757E05759CbD106d7dFcE8') as `0x${string}`;
-
   // CRITICAL: Normalize label using viem/ens normalize() (ENSIP-15)
   const normalizedLabel = normalize(subnameLabel);
   console.log(`   🔤 Normalizing label: "${subnameLabel}" → "${normalizedLabel}"`);
 
-  // NameWrapper ABI with setSubnodeRecord
-  const NAMEWRAPPER_ABI = [
+  // Minimum registration duration (1 year)
+  const MIN_DURATION = 365 * 24 * 60 * 60;
+
+  // RegistrarController ABI
+  const REGISTRAR_CONTROLLER_ABI = [
     {
-      name: 'setSubnodeRecord',
+      name: 'registerPrice',
       type: 'function',
-      stateMutability: 'nonpayable',
+      stateMutability: 'view',
       inputs: [
-        { name: 'parentNode', type: 'bytes32' },
-        { name: 'label', type: 'string' },
+        { name: 'name', type: 'string' },
+        { name: 'duration', type: 'uint256' },
+      ],
+      outputs: [{ type: 'uint256' }],
+    },
+    {
+      name: 'register',
+      type: 'function',
+      stateMutability: 'payable',
+      inputs: [
+        {
+          name: 'request',
+          type: 'tuple',
+          components: [
+            { name: 'name', type: 'string' },
         { name: 'owner', type: 'address' },
+            { name: 'duration', type: 'uint256' },
         { name: 'resolver', type: 'address' },
-        { name: 'ttl', type: 'uint64' },
-        { name: 'fuses', type: 'uint32' },
-        { name: 'expiry', type: 'uint64' },
+            { name: 'data', type: 'bytes[]' },
+            { name: 'reverseRecord', type: 'bool' },
+          ],
+        },
       ],
       outputs: [],
     },
-  ];
+  ] as const;
 
   const publicClient = createPublicClient({
-    chain: sepolia,
+    chain: baseSepolia,
     transport: http(rpcUrl),
   });
 
   const account = privateKeyToAccount(privateKey as Hex);
   const walletClient = createWalletClient({
     account,
-    chain: sepolia,
+    chain: baseSepolia,
     transport: http(rpcUrl),
   });
 
-  // Use the derived address from the private key (like the working script does)
+  // Use the derived address from the private key
   const ownerAddress = account.address;
 
   try {
-    const resolver = process.env.ENS_RESOLVER_SEPOLIA as `0x${string}`;
-    if (!resolver) {
-      throw new Error('ENS_RESOLVER_SEPOLIA not set in .env.local');
-    }
+    // Step 1: Get registration price
+    console.log(`\n💰 Getting registration price...`);
+    const price = await publicClient.readContract({
+      address: REGISTRAR_CONTROLLER,
+      abi: REGISTRAR_CONTROLLER_ABI,
+      functionName: 'registerPrice',
+      args: [normalizedLabel, BigInt(MIN_DURATION)],
+    });
+    console.log(`   Price: ${price.toString()} wei (${(Number(price) / 1e18).toFixed(6)} ETH)`);
 
-    // Calculate expiry: 1 year in the future
-    const now = Math.floor(Date.now() / 1000);
-    const oneYearInSeconds = 365 * 24 * 60 * 60;
-    const expiryTimestamp = BigInt(now + oneYearInSeconds);
+    // Step 2: Build RegisterRequest (empty data array - records set separately)
+    const request = {
+      name: normalizedLabel,
+      owner: ownerAddress,
+      duration: BigInt(MIN_DURATION),
+      resolver: RESOLVER,
+      data: [] as `0x${string}`[], // Empty - records set separately via executeENSRecords
+      reverseRecord: false,
+    };
 
-    console.log(`   Parent Node: ${parentNode}`);
     console.log(`   Label: ${normalizedLabel} (normalized)`);
     console.log(`   Owner: ${ownerAddress}`);
-    console.log(`   Resolver: ${resolver}`);
-    console.log(`   TTL: 0`);
-    console.log(`   Fuses: 0 (no fuses burned)`);
-    console.log(`   Expiry: ${expiryTimestamp} (${new Date(Number(expiryTimestamp) * 1000).toISOString()})`);
-    console.log(`   NameWrapper: ${NAMEWRAPPER_ADDRESS}\n`);
+    console.log(`   Resolver: ${RESOLVER}`);
+    console.log(`   Duration: ${MIN_DURATION} seconds (1 year)`);
+    console.log(`   Controller: ${REGISTRAR_CONTROLLER}\n`);
 
-    // Single call: setSubnodeRecord (creates subname + sets owner + resolver + expiry)
-    console.log(`   📋 Calling setSubnodeRecord (creates subname with resolver in one tx)...`);
-    
+    // Step 3: Simulate transaction
+    console.log(`   📋 Simulating registration...`);
     try {
-      // Simulate first to catch errors
       await publicClient.simulateContract({
         account,
-        address: NAMEWRAPPER_ADDRESS,
-        abi: NAMEWRAPPER_ABI,
-        functionName: 'setSubnodeRecord',
-        args: [
-          parentNode as `0x${string}`,
-          normalizedLabel,  // Use normalized (lowercase) label
-          ownerAddress,  // Use derived address
-          resolver,
-          BigInt(0), // ttl
-          0, // fuses (no fuses burned)
-          expiryTimestamp, // Valid future timestamp
-        ],
+        address: REGISTRAR_CONTROLLER,
+        abi: REGISTRAR_CONTROLLER_ABI,
+        functionName: 'register',
+        args: [request],
+        value: price,
       });
       console.log(`      📋 Simulation passed\n`);
     } catch (simErr) {
@@ -492,44 +518,39 @@ export async function createENSSubname(
       throw simErr;
     }
 
+    // Step 4: Execute transaction
     const txHash = await walletClient.writeContract({
-      account,
-      address: NAMEWRAPPER_ADDRESS,
-      abi: NAMEWRAPPER_ABI,
-      functionName: 'setSubnodeRecord',
-      args: [
-        parentNode as `0x${string}`,
-        normalizedLabel,  // Use normalized (lowercase) label
-        ownerAddress,  // Use derived address, not env var
-        resolver,
-        BigInt(0), // ttl
-        0, // fuses
-        expiryTimestamp, // Valid future timestamp
-      ],
+      address: REGISTRAR_CONTROLLER,
+      abi: REGISTRAR_CONTROLLER_ABI,
+      functionName: 'register',
+      args: [request],
+      value: price,
     });
 
     console.log(`      ✅ Tx sent: ${txHash}`);
     const receipt = await publicClient.waitForTransactionReceipt({ 
       hash: txHash,
-      confirmations: 2  // Wait for 2 confirmations like the working script
+      confirmations: 2
     });
     console.log(`      ✅ Confirmed (block ${receipt.blockNumber}, status: ${receipt.status})\n`);
     
-    // Additional delay to ensure ENS state propagates
-    console.log(`      ⏳ Waiting 3 seconds for ENS state to propagate...`);
+    // Additional delay to ensure state propagates
+    console.log(`      ⏳ Waiting 3 seconds for state to propagate...`);
     await new Promise(resolve => setTimeout(resolve, 3000));
     console.log(`      ✅ Ready to set records\n`);
 
     return txHash;
   } catch (error) {
-    console.error('❌ Failed to create subname:', error);
+    console.error('❌ Failed to create basename:', error);
     throw error;
   }
 }
 
 /**
- * Execute ENS setText transactions on Sepolia L1
+ * Execute Basenames setText transactions on Base Sepolia
  * Broadcasts all transactions and waits for confirmation
+ * Note: With Basenames, records can be batched in registration, but this function
+ * is kept for legacy flow support and updating existing names.
  *
  * @param records - Record key-value pairs to set
  * @param subnameNode - The namehash of the subname
@@ -541,9 +562,9 @@ export async function executeENSRecords(
   subnameNode: string,
   creatorAddress?: string
 ): Promise<string[]> {
-  console.log(`\n🚀 Executing ENS records on Sepolia L1...`);
+  console.log(`\n🚀 Executing Basenames records on Base Sepolia...`);
 
-  const rpcUrl = process.env.SEPOLIA_RPC_URL || 'https://sepolia.infura.io/v3/' + process.env.INFURA_KEY;
+  const rpcUrl = process.env.BASE_RPC_URL!;
   const privateKey = process.env.CURATOR_PRIVATE_KEY;
 
   if (!privateKey) {
@@ -552,14 +573,14 @@ export async function executeENSRecords(
 
   // Create clients
   const publicClient = createPublicClient({
-    chain: sepolia,
+    chain: baseSepolia,
     transport: http(rpcUrl),
   });
 
   const account = privateKeyToAccount(privateKey as Hex);
   const walletClient = createWalletClient({
     account,
-    chain: sepolia,
+    chain: baseSepolia,
     transport: http(rpcUrl),
   });
 
@@ -597,7 +618,7 @@ export async function executeENSRecords(
     // First, set the address record using setAddr() for proper resolution
     if (creatorAddress) {
       console.log(`\n   [0/11] Setting primary address record (setAddr)...`);
-      console.log(`      Resolver: ${process.env.ENS_RESOLVER_SEPOLIA}`);
+        console.log(`      Resolver: ${RESOLVER}`);
       console.log(`      Node: ${subnameNode}`);
       console.log(`      Address: ${creatorAddress}\n`);
 
@@ -607,7 +628,7 @@ export async function executeENSRecords(
         try {
           // DEBUG: Log exact parameters being used
           console.log(`      🔍 DEBUG setAddr parameters:`);
-          console.log(`         Resolver: ${process.env.ENS_RESOLVER_SEPOLIA}`);
+            console.log(`         Resolver: ${RESOLVER}`);
           console.log(`         Node: ${subnameNode}`);
           console.log(`         Address to set: ${creatorAddress}`);
           console.log(`         Account signing: ${walletClient.account?.address}`);
@@ -615,7 +636,7 @@ export async function executeENSRecords(
           
           const { result } = await publicClient.simulateContract({
             account: walletClient.account,
-            address: process.env.ENS_RESOLVER_SEPOLIA as `0x${string}`,
+              address: RESOLVER,
             abi: RESOLVER_ABI,
             functionName: 'setAddr',
             args: [subnameNode as `0x${string}`, creatorAddress as `0x${string}`],
@@ -636,7 +657,7 @@ export async function executeENSRecords(
         // If simulation passed, execute the transaction
         console.log(`      🚀 Executing setAddr transaction...`);
         const txHash = await walletClient.writeContract({
-          address: process.env.ENS_RESOLVER_SEPOLIA as `0x${string}`,
+            address: RESOLVER,
           abi: RESOLVER_ABI,
           functionName: 'setAddr',
           args: [subnameNode as `0x${string}`, creatorAddress as `0x${string}`],
@@ -700,7 +721,7 @@ export async function executeENSRecords(
         try {
           await publicClient.simulateContract({
             account: walletClient.account,
-            address: process.env.ENS_RESOLVER_SEPOLIA as `0x${string}`,
+            address: RESOLVER,
             abi: RESOLVER_ABI,
             functionName: 'setText',
             args: [subnameNode as `0x${string}`, key, value],
@@ -714,7 +735,7 @@ export async function executeENSRecords(
 
         // Execute the transaction
         const txHash = await walletClient.writeContract({
-          address: process.env.ENS_RESOLVER_SEPOLIA as `0x${string}`,
+          address: RESOLVER,
           abi: RESOLVER_ABI,
           functionName: 'setText',
           args: [subnameNode as `0x${string}`, key, value],
@@ -767,10 +788,12 @@ export async function executeENSRecords(
 
 /**
  * Get calldata for creating ENS subname via NameWrapper
- * Returns calldata that Safe can execute
+ * @deprecated This function is for ENS NameWrapper which doesn't exist in Basenames.
+ * Use getENSCompleteCalldata() instead, which batches everything into RegistrarController.register().
+ * This function is kept for backward compatibility but may not work with Basenames.
  * 
- * @param subnameLabel - e.g., "SOMA001" or "EROS001"
- * @param parentNode - Namehash of parent domain (e.g., scenedex.eth)
+ * @param subnameLabel - e.g., "EROS001"
+ * @param parentNode - Namehash of parent domain (e.g., scenius.basetest.eth)
  * @param ownerAddress - Address that will own the subname (should be Safe address)
  * @returns Calldata for setSubnodeRecord call
  */
@@ -854,12 +877,7 @@ export function getENSAddressRecordCalldata(
   subnameNode: string,
   creatorAddress: string
 ): { to: string; data: string; value: string } {
-  console.log(`\n📝 Preparing ENS address record calldata...`);
-
-  const resolver = process.env.ENS_RESOLVER_SEPOLIA as `0x${string}`;
-  if (!resolver) {
-    throw new Error('ENS_RESOLVER_SEPOLIA not set in .env.local');
-  }
+  console.log(`\n📝 Preparing Basenames address record calldata...`);
 
   // Resolver ABI for setAddr
   const RESOLVER_ABI = [
@@ -882,32 +900,32 @@ export function getENSAddressRecordCalldata(
   });
 
   console.log(`   ✅ Calldata prepared for setAddr`);
-  console.log(`      To: ${resolver}`);
+  console.log(`      To: ${RESOLVER}`);
   console.log(`      Node: ${subnameNode}`);
   console.log(`      Address: ${creatorAddress}`);
 
   return {
-    to: resolver,
+    to: RESOLVER,
     data: calldata,
     value: '0',
   };
 }
 
 /**
- * Get complete ENS calldata for all operations
- * Returns array of calldata operations in correct order:
- * 1. Create subname (setSubnodeRecord)
- * 2. Set address record (setAddr)
- * 3. Set all text records (setText for each)
+ * Get complete Basenames calldata for all operations
+ * Returns SINGLE operation that batches everything:
+ * - Creates basename via RegistrarController.register()
+ * - Sets address record (setAddr) via data[] parameter
+ * - Sets all text records (setText × 11) via data[] parameter
  * 
  * @param release - Release data
  * @param coinAddress - Zora coin address
  * @param coinSymbol - Zora coin symbol
  * @param splitAddress - Splits contract address
  * @param creatorAddress - Creator's address
- * @param safeAddress - Safe address (will own the subname)
+ * @param safeAddress - Safe address (will own the basename)
  * @param erosNumber - Optional EROS number (if not provided, will get next available)
- * @returns Array of calldata operations for Safe to execute
+ * @returns Array with SINGLE calldata operation for Safe to execute (1 tx instead of 13)
  */
 export async function getENSCompleteCalldata(
   release: Release,
@@ -918,39 +936,416 @@ export async function getENSCompleteCalldata(
   safeAddress: string,
   erosNumber?: number
 ): Promise<Array<{ to: string; data: string; value: string }>> {
-  console.log(`\n📦 Preparing complete ENS calldata for Safe transaction...`);
+  console.log(`\n📦 Preparing complete Basenames calldata for Safe transaction...`);
+
+  const rpcUrl = process.env.BASE_RPC_URL!;
+  const publicClient = createPublicClient({
+    chain: baseSepolia,
+    transport: http(rpcUrl),
+  });
 
   // Get subname details (reuse registerEROSRelease logic)
   const finalErosNumber = erosNumber !== undefined ? erosNumber : await getNextEROSNumber();
   const subnameLabel = formatEROSNumber(finalErosNumber);
-  const ensDomain = process.env.ENS_DOMAIN || 'scenedex.eth';
-  const fullSubname = `${subnameLabel}.${ensDomain}`;
+  const normalizedLabel = normalize(subnameLabel);
+  const fullSubname = `${normalizedLabel}.${PARENT_DOMAIN}`;
   const subnameNode = getNamehash(fullSubname);
 
   console.log(`   Subname: ${fullSubname}`);
+  console.log(`   Label: ${normalizedLabel} (normalized)`);
   console.log(`   Node: ${subnameNode}`);
+  console.log(`   Owner: ${safeAddress}`);
 
-  const operations: Array<{ to: string; data: string; value: string }> = [];
+  // Step 0: Check who owns the baseNode to determine which flow to use
+  console.log(`\n🔍 Checking baseNode ownership to determine registration method...`);
+  const REGISTRY_ADDRESS = '0x1493b2567056c2181630115660963E13A8E32735' as `0x${string}`;
+  const BASE_REGISTRAR = process.env.BASENAMES_BASE_REGISTRAR_BASE_SEPOLIA as `0x${string}`;
+  
+  let baseNodeOwner: string;
+  try {
+    baseNodeOwner = await publicClient.readContract({
+      address: REGISTRY_ADDRESS,
+      abi: [{
+        name: 'owner',
+        type: 'function',
+        stateMutability: 'view',
+        inputs: [{ name: 'node', type: 'bytes32' }],
+        outputs: [{ type: 'address' }],
+      }],
+      functionName: 'owner',
+      args: [PARENT_NODE],
+    });
+    console.log(`   BaseNode owner: ${baseNodeOwner}`);
+    console.log(`   BaseRegistrar: ${BASE_REGISTRAR}`);
+  } catch (error) {
+    console.warn(`   ⚠️  Could not check ownership, defaulting to RegistrarController flow`);
+    baseNodeOwner = BASE_REGISTRAR || '';
+  }
 
-  // Step 1: Create subname (setSubnodeRecord)
-  const parentNode = getNamehash(ensDomain);
-  const subnameCalldata = getENSSubnameCalldata(subnameLabel, parentNode, safeAddress);
-  operations.push(subnameCalldata);
-  console.log(`   ✅ Added setSubnodeRecord calldata`);
+  const useRegistrarController = baseNodeOwner.toLowerCase() === BASE_REGISTRAR?.toLowerCase();
+  
+  if (useRegistrarController) {
+    console.log(`   ✅ Using RegistrarController flow (BaseRegistrar owns baseNode)`);
+    console.log(`   💰 Payment required: ~0.001 ETH`);
+    return await getRegistrarControllerCalldata(
+      release,
+      coinAddress,
+      coinSymbol,
+      splitAddress,
+      creatorAddress,
+      safeAddress,
+      finalErosNumber,
+      normalizedLabel,
+      fullSubname,
+      subnameNode,
+      publicClient
+    );
+  } else {
+    console.log(`   ✅ Using Direct Registry flow (User owns baseNode)`);
+    console.log(`   🆓 FREE - No payment required`);
+    return getDirectRegistryCalldata(
+      release,
+      coinAddress,
+      coinSymbol,
+      splitAddress,
+      creatorAddress,
+      safeAddress,
+      finalErosNumber,
+      normalizedLabel,
+      fullSubname,
+      subnameNode
+    );
+  }
+}
 
-  // Step 2: Set address record (setAddr)
-  const addressCalldata = getENSAddressRecordCalldata(subnameNode, creatorAddress);
-  operations.push(addressCalldata);
-  console.log(`   ✅ Added setAddr calldata`);
+/**
+ * Get calldata using RegistrarController.register() (requires BaseRegistrar to own baseNode)
+ */
+async function getRegistrarControllerCalldata(
+  release: Release,
+  coinAddress: string,
+  coinSymbol: string,
+  splitAddress: string,
+  creatorAddress: string,
+  safeAddress: string,
+  erosNumber: number,
+  normalizedLabel: string,
+  fullSubname: string,
+  subnameNode: `0x${string}`,
+  publicClient: any
+): Promise<Array<{ to: string; data: string; value: string }>> {
+  // Minimum registration duration (1 year)
+  const MIN_DURATION = 365 * 24 * 60 * 60;
 
-  // Step 3: Set all text records (setText)
+  // Step 1: Get registration price
+  console.log(`\n💰 Getting registration price...`);
+  const REGISTRAR_CONTROLLER_ABI = [
+    {
+      name: 'registerPrice',
+      type: 'function',
+      stateMutability: 'view',
+      inputs: [
+        { name: 'name', type: 'string' },
+        { name: 'duration', type: 'uint256' },
+      ],
+      outputs: [{ type: 'uint256' }],
+    },
+    {
+      name: 'register',
+      type: 'function',
+      stateMutability: 'payable',
+      inputs: [
+        {
+          name: 'request',
+          type: 'tuple',
+          components: [
+            { name: 'name', type: 'string' },
+            { name: 'owner', type: 'address' },
+            { name: 'duration', type: 'uint256' },
+            { name: 'resolver', type: 'address' },
+            { name: 'data', type: 'bytes[]' },
+            { name: 'reverseRecord', type: 'bool' },
+          ],
+        },
+      ],
+      outputs: [],
+    },
+  ] as const;
+
+  const price = await publicClient.readContract({
+    address: REGISTRAR_CONTROLLER,
+    abi: REGISTRAR_CONTROLLER_ABI,
+    functionName: 'registerPrice',
+    args: [normalizedLabel, BigInt(MIN_DURATION)],
+  });
+  console.log(`   Price: ${price.toString()} wei (${(Number(price) / 1e18).toFixed(6)} ETH)`);
+
+  // Step 2: Build records
   const records = buildRecordsFromRelease(release, coinAddress, coinSymbol, splitAddress, creatorAddress, finalErosNumber);
-  const textRecordsCalldata = buildSetTextTransactions(subnameNode, records);
-  operations.push(...textRecordsCalldata);
-  console.log(`   ✅ Added ${textRecordsCalldata.length} setText calldata operations`);
+  console.log(`\n📝 Building batched records data...`);
+  console.log(`   Records: ${Object.keys(records).length} text records`);
 
-  console.log(`\n✅ Complete ENS calldata prepared: ${operations.length} operations total\n`);
+  // Step 3: Build batched resolver data (setAddr + all setText calls)
+  const recordsData: `0x${string}`[] = [];
+  
+  // Resolver ABI for encoding
+  const RESOLVER_ABI_FOR_ENCODING = [
+    {
+      name: 'setAddr',
+      type: 'function',
+      inputs: [
+        { name: 'node', type: 'bytes32' },
+        { name: 'addr', type: 'address' },
+      ],
+      outputs: [],
+      stateMutability: 'nonpayable',
+    },
+    {
+      name: 'setText',
+      type: 'function',
+      inputs: [
+        { name: 'node', type: 'bytes32' },
+        { name: 'key', type: 'string' },
+        { name: 'value', type: 'string' },
+      ],
+      outputs: [],
+      stateMutability: 'nonpayable',
+    },
+  ] as const;
+
+  // Add setAddr to batch
+  recordsData.push(
+    encodeFunctionData({
+      abi: RESOLVER_ABI_FOR_ENCODING,
+      functionName: 'setAddr',
+      args: [subnameNode, creatorAddress as `0x${string}`],
+    })
+  );
+  console.log(`   ✅ Added setAddr to batch`);
+
+  // Add all setText calls to batch
+  for (const [key, value] of Object.entries(records)) {
+    recordsData.push(
+      encodeFunctionData({
+        abi: RESOLVER_ABI_FOR_ENCODING,
+        functionName: 'setText',
+        args: [subnameNode, key, value],
+      })
+    );
+  }
+  console.log(`   ✅ Added ${Object.keys(records).length} setText calls to batch`);
+
+  // Step 4: Build RegisterRequest with batched data
+  // Note: reverseRecord: false - we set reverse record separately for parent domain
+  const request = {
+    name: normalizedLabel,
+    owner: safeAddress as `0x${string}`,
+    duration: BigInt(MIN_DURATION),
+    resolver: RESOLVER,
+    data: recordsData, // ALL records batched (setAddr + 11 setText calls)
+    reverseRecord: false, // Reverse record set separately for Safe → parent domain
+  };
+
+  // Step 5: Encode register() call
+  const calldata = encodeFunctionData({
+    abi: REGISTRAR_CONTROLLER_ABI,
+    functionName: 'register',
+    args: [request],
+  });
+
+  console.log(`\n✅ Complete Basenames calldata prepared: 1 operation (batched)`);
+  console.log(`   Total records batched: ${recordsData.length} (1 setAddr + ${Object.keys(records).length} setText)`);
+  console.log(`   Payment: ${price.toString()} wei\n`);
+
+  // Return SINGLE operation (1 tx instead of 13)
+  return [{
+    to: REGISTRAR_CONTROLLER,
+    data: calldata,
+    value: price.toString(), // ETH payment required
+  }];
+}
+
+/**
+ * Get calldata using direct Registry methods (FREE, no payment, no BaseRegistrar required)
+ */
+function getDirectRegistryCalldata(
+  release: Release,
+  coinAddress: string,
+  coinSymbol: string,
+  splitAddress: string,
+  creatorAddress: string,
+  safeAddress: string,
+  erosNumber: number,
+  normalizedLabel: string,
+  fullSubname: string,
+  subnameNode: `0x${string}`
+): Array<{ to: string; data: string; value: string }> {
+  console.log(`\n📝 Building direct Registry calldata (FREE, no payment)...`);
+  
+  const operations: Array<{ to: string; data: string; value: string }> = [];
+  const REGISTRY_ADDRESS = '0x1493b2567056c2181630115660963E13A8E32735' as `0x${string}`;
+  
+  // Build records
+  const records = buildRecordsFromRelease(release, coinAddress, coinSymbol, splitAddress, creatorAddress, erosNumber);
+  console.log(`   Records: ${Object.keys(records).length} text records`);
+  
+  // Label hash is keccak256 of the label bytes
+  const labelHash = keccak256(toBytes(normalizedLabel));
+  
+  // Operation 1: Registry.setSubnodeRecord() - Creates subname + sets owner + resolver (FREE)
+  const REGISTRY_ABI = [
+    {
+      name: 'setSubnodeRecord',
+      type: 'function',
+      stateMutability: 'nonpayable',
+      inputs: [
+        { name: 'node', type: 'bytes32' },
+        { name: 'label', type: 'bytes32' },
+        { name: 'owner', type: 'address' },
+        { name: 'resolver', type: 'address' },
+        { name: 'ttl', type: 'uint64' },
+      ],
+      outputs: [],
+    },
+  ] as const;
+  
+  operations.push({
+    to: REGISTRY_ADDRESS,
+    data: encodeFunctionData({
+      abi: REGISTRY_ABI,
+      functionName: 'setSubnodeRecord',
+      args: [
+        PARENT_NODE,
+        labelHash,
+        safeAddress as `0x${string}`,
+        RESOLVER,
+        0n, // TTL = 0 (default)
+      ],
+    }),
+    value: '0', // FREE - no payment required
+  });
+  console.log(`   ✅ Added Registry.setSubnodeRecord() (creates subname, FREE)`);
+  
+  // Operation 2-N: Individual resolver operations (setAddr + setText × N)
+  // WORKAROUND: resolver.multicall() fails when called from Safe, but individual operations work
+  // So we create individual operations that Safe can batch in multi-send
+  const RESOLVER_ABI = [
+    {
+      name: 'setAddr',
+      type: 'function',
+      stateMutability: 'nonpayable',
+      inputs: [
+        { name: 'node', type: 'bytes32' },
+        { name: 'addr', type: 'address' },
+      ],
+      outputs: [],
+    },
+    {
+      name: 'setText',
+      type: 'function',
+      stateMutability: 'nonpayable',
+      inputs: [
+        { name: 'node', type: 'bytes32' },
+        { name: 'key', type: 'string' },
+        { name: 'value', type: 'string' },
+      ],
+      outputs: [],
+    },
+  ] as const;
+  
+  // Add setAddr as individual operation
+  operations.push({
+    to: RESOLVER,
+    data: encodeFunctionData({
+      abi: RESOLVER_ABI,
+      functionName: 'setAddr',
+      args: [subnameNode, creatorAddress as `0x${string}`],
+    }),
+    value: '0',
+  });
+  console.log(`   ✅ Added Resolver.setAddr()`);
+  
+  // Add all setText calls as individual operations
+  for (const [key, value] of Object.entries(records)) {
+    operations.push({
+      to: RESOLVER,
+      data: encodeFunctionData({
+        abi: RESOLVER_ABI,
+        functionName: 'setText',
+        args: [subnameNode, key, value],
+      }),
+      value: '0',
+    });
+  }
+  console.log(`   ✅ Added ${Object.keys(records).length} Resolver.setText() calls`);
+  
+  console.log(`\n✅ Direct Registry calldata prepared: ${operations.length} operations`);
+  console.log(`   Total operations: ${operations.length} (1 setSubnodeRecord + 1 setAddr + ${Object.keys(records).length} setText)`);
+  console.log(`   Payment: 0 wei (FREE)\n`);
+  
   return operations;
+}
+
+/**
+ * Get calldata for setting Safe's reverse record (primary name) to parent domain
+ * Returns calldata that Safe can execute to set: Safe address → scenius.basetest.eth
+ * 
+ * This should be included in the Safe transaction batch along with registration.
+ * The Safe is authorized to set its own reverse record since it's executing the transaction.
+ * 
+ * @param safeAddress - The Safe address that will own the reverse record
+ * @returns Calldata for ReverseRegistrar.setNameForAddr() call
+ */
+export function getReverseRecordCalldata(
+  safeAddress: string
+): { to: string; data: string; value: string } {
+  console.log(`\n🔄 Preparing reverse record calldata...`);
+  console.log(`   Setting Safe address → ${PARENT_DOMAIN}`);
+  console.log(`   This sets the primary name for the Safe address\n`);
+
+  // ReverseRegistrar ABI for setNameForAddr
+  const REVERSE_REGISTRAR_ABI = [
+    {
+      name: 'setNameForAddr',
+      type: 'function',
+      stateMutability: 'nonpayable',
+      inputs: [
+        { name: 'addr', type: 'address' },
+        { name: 'owner', type: 'address' },
+        { name: 'resolver', type: 'address' },
+        { name: 'name', type: 'string' },
+      ],
+      outputs: [{ name: '', type: 'bytes32' }],
+    },
+  ] as const;
+
+  // Encode setNameForAddr call
+  // Parameters:
+  // - addr: Safe address (the address that will resolve to the name)
+  // - owner: Safe address (the owner of the reverse record - Safe owns itself)
+  // - resolver: RESOLVER (the resolver contract)
+  // - name: PARENT_DOMAIN (scenius.basetest.eth)
+  const calldata = encodeFunctionData({
+    abi: REVERSE_REGISTRAR_ABI,
+    functionName: 'setNameForAddr',
+    args: [
+      safeAddress as `0x${string}`,
+      safeAddress as `0x${string}`, // Safe owns its own reverse record
+      RESOLVER,
+      PARENT_DOMAIN,
+    ],
+  });
+
+  console.log(`   ✅ Reverse record calldata prepared`);
+  console.log(`      To: ${REVERSE_REGISTRAR}`);
+  console.log(`      Address: ${safeAddress}`);
+  console.log(`      Name: ${PARENT_DOMAIN}\n`);
+
+  return {
+    to: REVERSE_REGISTRAR,
+    data: calldata,
+    value: '0', // No payment required
+  };
 }
 
 // ============================================================================
@@ -958,38 +1353,38 @@ export async function getENSCompleteCalldata(
 // ============================================================================
 
 /**
- * Resolve an Ethereum address to its primary ENS name (reverse resolution)
+ * Resolve an Ethereum address to its primary Basename/ENS name (reverse resolution)
  * 
  * IMPORTANT: Always verifies the forward resolution to prevent spoofing.
  * If the resolved name doesn't point back to the original address, returns null.
  * 
  * @param address - The Ethereum address to resolve (0x...)
- * @param chainId - Optional chain ID (defaults to Sepolia for testnet)
- * @returns The ENS name (e.g., "scenester.eth") or null if not found or verification fails
+ * @param chainId - Optional chain ID (defaults to Base Sepolia for testnet)
+ * @returns The Basename/ENS name (e.g., "eros001.scenius.basetest.eth") or null if not found or verification fails
  * 
  * @example
  * const name = await resolveAddressToENS('0xf2fa1E8e06641C76Cfe2854c1e4D932a8b6e29fD');
- * // Returns: "scenester.eth" (if registered and verified)
+ * // Returns: "eros001.scenius.basetest.eth" (if registered and verified)
  */
 export async function resolveAddressToENS(
   address: Address | string,
-  chainId: number = sepolia.id
+  chainId: number = baseSepolia.id
 ): Promise<string | null> {
   try {
-    const rpcUrl = process.env.SEPOLIA_RPC_URL || 'https://sepolia.infura.io/v3/' + process.env.INFURA_KEY;
+    const rpcUrl = process.env.BASE_RPC_URL!;
     
-    // Create public client for Sepolia (ENS resolution always starts from L1)
+    // Create public client for Base Sepolia (Basenames resolution on L2)
     const publicClient = createPublicClient({
-      chain: sepolia,
+      chain: baseSepolia,
       transport: http(rpcUrl),
     });
 
     // Normalize address to ensure proper format
     const normalizedAddress = address.toLowerCase() as Address;
 
-    console.log(`\n🔍 Resolving address to ENS name...`);
+    console.log(`\n🔍 Resolving address to Basename/ENS name...`);
     console.log(`   Address: ${normalizedAddress}`);
-    console.log(`   Chain: Sepolia (${sepolia.id})`);
+    console.log(`   Chain: Base Sepolia (${baseSepolia.id})`);
 
     // Step 1: Reverse resolution (address → name)
     const ensName = await publicClient.getEnsName({
@@ -997,11 +1392,11 @@ export async function resolveAddressToENS(
     });
 
     if (!ensName) {
-      console.log(`   ❌ No ENS name found for address`);
+      console.log(`   ❌ No Basename/ENS name found for address`);
       return null;
     }
 
-    console.log(`   ✅ Found ENS name: ${ensName}`);
+    console.log(`   ✅ Found Basename/ENS name: ${ensName}`);
 
     // Step 2: Verify forward resolution (name → address) to prevent spoofing
     // This is CRITICAL - always verify the reverse record points back to the original address
@@ -1030,21 +1425,21 @@ export async function resolveAddressToENS(
     return ensName;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error(`❌ Failed to resolve address to ENS name: ${errorMessage}`);
+    console.error(`❌ Failed to resolve address to Basename/ENS name: ${errorMessage}`);
     return null;
   }
 }
 
 /**
- * Resolve multiple addresses to their ENS names
+ * Resolve multiple addresses to their Basename/ENS names
  * 
  * @param addresses - Array of Ethereum addresses to resolve
- * @param chainId - Optional chain ID (defaults to Sepolia for testnet)
- * @returns Map of address → ENS name (or null if not found)
+ * @param chainId - Optional chain ID (defaults to Base Sepolia for testnet)
+ * @returns Map of address → Basename/ENS name (or null if not found)
  */
 export async function resolveAddressesToENS(
   addresses: (Address | string)[],
-  chainId: number = sepolia.id
+  chainId: number = baseSepolia.id
 ): Promise<Map<string, string | null>> {
   const results = new Map<string, string | null>();
   

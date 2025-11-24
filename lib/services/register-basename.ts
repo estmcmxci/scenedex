@@ -21,10 +21,9 @@ import { normalize } from 'viem/ens';
 // ==============================================================================
 
 // Contract addresses (Base Sepolia)
-// Note: Using Legacy GA Controller - it works for registration without resolver data
-// We can set resolver records separately after registration
-const REGISTRAR_CONTROLLER = process.env.BASENAMES_REGISTRAR_CONTROLLER_BASE_SEPOLIA as `0x${string}`;
-const RESOLVER = process.env.BASENAMES_RESOLVER_BASE_SEPOLIA as `0x${string}`;
+// Using Upgradeable Controller + Resolver for future-proofing
+const REGISTRAR_CONTROLLER = process.env.BASENAMES_UPGRADEABLE_CONTROLLER_BASE_SEPOLIA as `0x${string}`;
+const RESOLVER = process.env.BASENAMES_UPGRADEABLE_RESOLVER_BASE_SEPOLIA as `0x${string}`;
 const BASE_REGISTRAR = process.env.BASENAMES_BASE_REGISTRAR_BASE_SEPOLIA as `0x${string}`;
 const REVERSE_REGISTRAR = process.env.BASENAMES_REVERSE_REGISTRAR_BASE_SEPOLIA as `0x${string}`;
 

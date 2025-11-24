@@ -1,17 +1,17 @@
 /**
- * ENS Query Tool - Read Scenedex Release Metadata from ENS
+ * Basenames Query Tool - Read Catalogue Release Metadata from Basenames
  * 
- * This script demonstrates how to query custom ENS text records that were set
+ * This script demonstrates how to query custom Basenames text records that were set
  * during the release publishing flow. It retrieves all on-chain metadata for a
- * given Scenedex release (identified by its ENS subname like soma007.scenedex.eth).
+ * given Catalogue release (identified by its Basename like eros001.scenius.basetest.eth).
  * 
  * Usage:
- *   npx tsx lib/services/query-ens.ts soma007.scenedex.eth
- *   npx tsx lib/services/query-ens.ts soma010.scenedex.eth
+ *   npx tsx lib/services/query-ens.ts eros001.scenius.basetest.eth
+ *   npx tsx lib/services/query-ens.ts eros002.scenius.basetest.eth
  * 
  * What it does:
- * 1. Connects to Sepolia ENS registry via RPC
- * 2. Resolves the ENS name to find its resolver contract
+ * 1. Connects to Base Sepolia Basenames registry via RPC
+ * 2. Resolves the Basename to find its resolver contract
  * 3. Queries all custom text records (eth.scenedex.*)
  * 4. Displays the complete release metadata
  */
@@ -20,19 +20,19 @@ import dotenv from 'dotenv';
 dotenv.config({ path: '.env.local' });
 
 import { createPublicClient, http } from 'viem';
-import { sepolia } from 'viem/chains';
+import { baseSepolia } from 'viem/chains';
 import { normalize } from 'viem/ens';
 
 // ============================================================================
 // PART 1: Initialize Viem Public Client
 // ============================================================================
-// Creates a read-only client to query Sepolia blockchain
+// Creates a read-only client to query Base Sepolia blockchain
 // - No private key needed (read-only operations)
-// - Uses SEPOLIA_RPC_URL from .env.local (Infura/Alchemy endpoint)
-// - Connects to Sepolia testnet where our ENS names are registered
+// - Uses BASE_RPC_URL from .env.local (Alchemy/Infura endpoint)
+// - Connects to Base Sepolia testnet where our Basenames are registered
 const publicClient = createPublicClient({
-  chain: sepolia,
-  transport: http(process.env.SEPOLIA_RPC_URL),
+  chain: baseSepolia,
+  transport: http(process.env.BASE_RPC_URL!),
 });
 
 // ============================================================================
@@ -96,14 +96,14 @@ const STANDARD_ENS_KEYS = {
 // PART 4: Query Function - Get All Records for an ENS Name
 // ============================================================================
 /**
- * Queries all Scenedex metadata from ENS for a given release name
+ * Queries all Catalogue metadata from Basenames for a given release name
  * 
  * How it works:
- * 1. Normalizes the ENS name (lowercase, proper encoding)
+ * 1. Normalizes the Basename (lowercase, proper encoding)
  * 2. Queries each text record key individually
  * 3. Returns structured object with all metadata
  * 
- * @param ensName - Full ENS name (e.g., "soma007.scenedex.eth")
+ * @param ensName - Full Basename (e.g., "eros001.scenius.basetest.eth")
  * @returns Object containing all on-chain metadata
  */
 async function queryScenedexRelease(ensName: string) {
@@ -269,8 +269,9 @@ function displayResults(data: Awaited<ReturnType<typeof queryScenedexRelease>>) 
   console.log(`   Description: ${data.standard.description || 'No description'}`);
   console.log();
   
-  console.log(`🌐 VIEW ON ENS APP:`);
-  console.log(`   https://sepolia.app.ens.domains/${data.ensName}\n`);
+  console.log(`🌐 VIEW ON BASENAMES:`);
+  console.log(`   Basename: ${data.ensName}`);
+  console.log(`   (Basenames are ENS-compatible and can be queried via standard ENS methods)\n`);
 }
 
 // ============================================================================
@@ -281,13 +282,13 @@ function displayResults(data: Awaited<ReturnType<typeof queryScenedexRelease>>) 
  * Parses command-line arguments and runs the query
  */
 async function main() {
-  // Get ENS name from command line argument
-  // Example: npx tsx lib/services/query-ens.ts soma007.scenedex.eth
+  // Get Basename from command line argument
+  // Example: npx tsx lib/services/query-ens.ts eros001.scenius.basetest.eth
   const ensName = process.argv[2];
   
   if (!ensName) {
-    console.error(`\n❌ Usage: npx tsx lib/services/query-ens.ts <ens-name>`);
-    console.error(`   Example: npx tsx lib/services/query-ens.ts soma007.scenedex.eth\n`);
+    console.error(`\n❌ Usage: npx tsx lib/services/query-ens.ts <basename>`);
+    console.error(`   Example: npx tsx lib/services/query-ens.ts eros001.scenius.basetest.eth\n`);
     process.exit(1);
   }
   

@@ -283,8 +283,8 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
       throw new Error(`Split and Zora contracts must be created client-side before Safe transaction`)
     }
 
-    // 10c: ENS calldata (ONLY operation in Safe transaction - Safe is on Sepolia)
-    console.log(`   10d: Building ENS calldata...`)
+    // 10c: Basenames calldata (ONLY operation in Safe transaction - Safe is on Base Sepolia)
+    console.log(`   10d: Building Basenames calldata...`)
     const ensCalldata = await getENSCompleteCalldata(
       {
         id: release.id,
@@ -307,7 +307,14 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
       erosNumber
     )
     operations.push(...ensCalldata)
-    console.log(`   ✅ ENS calldata ready (${ensCalldata.length} operations)`)
+    console.log(`   ✅ Basenames calldata ready (${ensCalldata.length} operations)`)
+
+    // 10d: Reverse record calldata (set Safe primary name to parent domain)
+    console.log(`   10e: Building reverse record calldata...`)
+    const { getReverseRecordCalldata } = await import('./ens')
+    const reverseRecordCalldata = getReverseRecordCalldata(safeAddressFormatted)
+    operations.push(reverseRecordCalldata)
+    console.log(`   ✅ Reverse record calldata ready (Safe → ${process.env.ENS_DOMAIN || 'scenius.basetest.eth'})`)
 
     // Step 11: Execute Safe transaction
     console.log(`Step 1️⃣1️⃣: Execute Safe transaction with ${operations.length} operations`)
@@ -315,17 +322,17 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
     const safeTxHash = txResult.hash || (txResult as any).safeTxHash || 'UNKNOWN'
     console.log(`✅ Safe transaction executed: ${safeTxHash}`)
 
-    // Step 11a: Wait for Safe transaction confirmation (ENS operations only)
-    console.log(`Step 1️⃣1️⃣a: Wait for Safe transaction confirmation (ENS operations)...`)
+    // Step 11a: Wait for Safe transaction confirmation (Basenames operations)
+    console.log(`Step 1️⃣1️⃣a: Wait for Safe transaction confirmation (Basenames operations)...`)
     let receipt: any = null // Store receipt for publication proof
     
     try {
       const { createPublicClient, http } = await import('viem')
-      const { sepolia } = await import('viem/chains')
-      const rpcUrl = process.env.SEPOLIA_RPC_URL || 'https://sepolia.infura.io/v3/' + process.env.INFURA_KEY
+      const { baseSepolia } = await import('viem/chains')
+      const rpcUrl = process.env.BASE_RPC_URL!
       
       const publicClient = createPublicClient({
-        chain: sepolia,
+        chain: baseSepolia,
         transport: http(rpcUrl),
       })
       
@@ -336,8 +343,8 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
       
       console.log(`   ✅ Transaction confirmed at block ${receipt.blockNumber}`)
       console.log(`   📋 Transaction logs: ${receipt.logs.length} entries`)
-      console.log(`   📝 Safe transaction only handled ENS operations on Sepolia`)
-      console.log(`   📝 Split and Zora coin were created separately on Base Sepolia`)
+      console.log(`   📝 Safe transaction handled Basenames registration on Base Sepolia`)
+      console.log(`   📝 All operations (Split, Zora, Basenames) are on Base Sepolia`)
       
     } catch (error) {
       console.warn(`⚠️  Failed to wait for transaction confirmation:`, error)
@@ -355,7 +362,7 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
         
         // Transaction proof: Safe transaction hash serves as on-chain proof
         transactionHash: safeTxHash,
-        transactionChain: 'sepolia', // Safe is on Sepolia
+        transactionChain: 'baseSepolia', // Safe is on Base Sepolia
         transactionBlockNumber: receipt?.blockNumber?.toString() || null,
         
         // Provenance (duplicated from metadata for verification)
@@ -705,8 +712,9 @@ export async function publishRelease(releaseId: string): Promise<void> {
         )
         
         ensSubname = ensResult.subnameLabel
-        console.log(`✅ ENS registration prepared`)
-        console.log(`   Subname: ${ensResult.subnameLabel}.scenedex.eth`)
+        console.log(`✅ Basenames registration prepared`)
+        const parentDomain = process.env.ENS_DOMAIN || 'scenius.basetest.eth'
+        console.log(`   Subname: ${ensResult.subnameLabel}.${parentDomain}`)
         console.log(`   Node: ${ensResult.subnameNode}`)
         console.log(`   Records: ${ensResult.batchSize} setText calls\n`)
 

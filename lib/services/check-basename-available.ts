@@ -18,7 +18,7 @@ import { normalize } from 'viem/ens';
 // Base Sepolia uses "basetest.eth" as the parent domain (not "base.eth")
 const PARENT_DOMAIN = 'basetest.eth';
 
-const REGISTRAR_CONTROLLER = process.env.BASENAMES_REGISTRAR_CONTROLLER_BASE_SEPOLIA as `0x${string}`;
+const REGISTRAR_CONTROLLER = process.env.BASENAMES_UPGRADEABLE_CONTROLLER_BASE_SEPOLIA as `0x${string}`;
 
 // ==============================================================================
 // ABI DEFINITION
