@@ -97,6 +97,7 @@ lib/
   └── validation.ts     # Zod schemas
 
 docs/                   # Documentation and diagrams
+  ├── ARCHITECTURE.md           # Detailed technical architecture
   └── architecture-flow-v1.svg  # System architecture diagram
 
 public/                 # Static assets
@@ -116,7 +117,7 @@ public/                 # Static assets
 
 ## Architecture
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed system architecture, data flows, and component documentation.
+See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for detailed system architecture, data flows, and component documentation.
 
 ### System Flow Diagram
 
@@ -165,5 +166,5 @@ The next iteration should include enhanced Zora contract interaction capabilitie
 
 ## License
 
-[Add your license here]
+MIT License © 2025 Oakgroup, Worldwide (Standing Title)
 
