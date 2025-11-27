@@ -96,6 +96,9 @@ lib/
   │   └── zora.ts       # Zora coin creation
   └── validation.ts     # Zod schemas
 
+docs/                   # Documentation and diagrams
+  └── architecture-flow-v1.svg  # System architecture diagram
+
 public/                 # Static assets
 ```
 
@@ -114,6 +117,25 @@ public/                 # Static assets
 ## Architecture
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed system architecture, data flows, and component documentation.
+
+### System Flow Diagram
+
+![Scenedex Architecture Flow](./docs/architecture-flow-v1.svg)
+
+The diagram above shows the complete end-to-end flow of the Scenedex platform:
+
+1. **Submission Phase**: Artists submit releases through the web interface
+2. **Approval Phase**: Curators approve via Safe multisig governance
+3. **Contract Creation**: Client-side preparation of IPFS pinning and contract calldata
+4. **Safe Batch Execution**: All on-chain operations executed atomically through Safe multisig
+5. **Finalization**: Database updates and cleanup
+
+Key components:
+- **PostgreSQL Database**: Stores releases, approvals, and temporary files
+- **IPFS Storage**: Immutable content storage via Storacha
+- **Base Sepolia**: L2 blockchain for all smart contract operations
+- **Safe Multisig**: Decentralized governance and execution
+- **ENS/Basenames**: Human-readable naming system
 
 ## Development
 
