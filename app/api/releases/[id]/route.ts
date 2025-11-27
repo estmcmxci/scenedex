@@ -43,15 +43,12 @@ import { getReleaseById } from '@/lib/db/releases';
 import { getApprovalsByReleaseId } from '@/lib/db/approvals';
 import { queryScenedexRelease } from '@/lib/services/query-ens';
 
-interface RouteParams {
-  params: {
-    id: string;
-  };
-}
-
-export async function GET(request: NextRequest, { params }: RouteParams) {
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
   try {
-    const id = params.id;
+    const { id } = await params;
 
     console.log(`📖 Fetching release: ${id}`);
 
@@ -80,7 +77,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         ensName: releaseData.ensName,
         primaryAddress: releaseData.primaryAddress,
         resolver: releaseData.resolver,
-        releaseId: releaseData.scenedex.releaseId || id.split('.')[0].toUpperCase(),
+        releaseId: releaseData.scenedex.releaseId || (id.split('.')[0] ?? id).toUpperCase(),
         artists: releaseData.scenedex.artists,
         description: releaseData.standard.description,
         // Convert IPFS hashes to gateway URLs

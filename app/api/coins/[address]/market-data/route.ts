@@ -35,20 +35,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getCoin } from '@zoralabs/coins-sdk';
 import { base } from 'viem/chains';
 
-interface RouteParams {
-  params: {
-    address: string;
-  };
-}
-
 // Validate Ethereum address format
 function isValidAddress(address: string): boolean {
   return /^0x[a-fA-F0-9]{40}$/.test(address);
 }
 
-export async function GET(request: NextRequest, { params }: RouteParams) {
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ address: string }> }
+) {
   try {
-    const { address } = params;
+    const { address } = await params;
 
     console.log(`📊 Fetching market data for coin: ${address}`);
 
@@ -74,18 +71,19 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    const coin = response.data.zora20Token;
+    // Cast to any to handle SDK type variations
+    const coin = response.data.zora20Token as any;
 
     console.log(`✅ Market data retrieved for: ${coin.name}`);
 
-    // Extract and structure market data
+    // Extract and structure market data (use optional chaining for SDK compatibility)
     const marketData = {
       address: coin.address,
       name: coin.name,
       symbol: coin.symbol,
       description: coin.description,
       marketCap: coin.marketCap,
-      liquidity: coin.liquidity,
+      totalVolume: coin.totalVolume,
       volume24h: coin.volume24h,
       marketCapDelta24h: coin.marketCapDelta24h,
       uniqueHolders: coin.uniqueHolders,

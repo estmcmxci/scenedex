@@ -14,7 +14,9 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 10000, // Increased to 10 seconds
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
 
 pool.on('error', (err) => {
@@ -31,22 +33,48 @@ pool.query('SELECT NOW()', (err, res) => {
 });
 
 /**
- * Execute a query with optional parameters
+ * Execute a query with optional parameters and retry logic
  */
 export async function query(
   text: string,
-  params?: any[]
+  params?: any[],
+  retries: number = 2
 ): Promise<QueryResult<any>> {
   const start = Date.now();
-  try {
-    const result = await pool.query(text, params);
-    const duration = Date.now() - start;
-    console.log('Executed query', { text, duration, rows: result.rowCount });
-    return result;
-  } catch (err) {
-    console.error('Database query error:', { text, err });
-    throw err;
+  let lastError: Error | null = null;
+  
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await pool.query(text, params);
+      const duration = Date.now() - start;
+      console.log('Executed query', { text, duration, rows: result.rowCount, attempt: attempt + 1 });
+      return result;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      const errorMessage = lastError.message.toLowerCase();
+      
+      // Retry on connection errors
+      const isConnectionError = 
+        errorMessage.includes('connection') ||
+        errorMessage.includes('timeout') ||
+        errorMessage.includes('terminated') ||
+        errorMessage.includes('econnreset');
+      
+      if (isConnectionError && attempt < retries) {
+        console.warn(`Database query failed (attempt ${attempt + 1}/${retries + 1}), retrying...`, { text, error: lastError.message });
+        // Wait before retrying (exponential backoff)
+        await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+        continue;
+      }
+      
+      // Don't retry on other errors or if we've exhausted retries
+      console.error('Database query error:', { text, err: lastError, attempt: attempt + 1 });
+      throw lastError;
+    }
   }
+  
+  // Should never reach here, but TypeScript needs it
+  throw lastError || new Error('Query failed after retries');
 }
 
 /**

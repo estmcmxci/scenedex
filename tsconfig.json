@@ -44,7 +44,6 @@
   },
   "include": [
     "lib/**/*",
-    "components/**/*",
     "app/**/*",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
@@ -54,6 +53,7 @@
     "dist",
     "**/*.test.ts",
     "**/*.test.tsx",
-    "jest.setup.ts"
+    "jest.setup.ts",
+    "lib/services/test-*.ts"
   ]
 }

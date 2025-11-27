@@ -43,4 +43,43 @@ Thumbs.db
 
 # Test Artifacts (generated test content)
 /test-artifacts/
+/prep/test-artifacts/
+
+# ============================================================================
+# Development & Planning Docs (30MB)
+# ============================================================================
+# Category: ARCHITECTURAL REFERENCE (High future value)
+# Contains: Research docs, protocol specs, architecture diagrams, test artifacts
+# See GITIGNORE-CATEGORIES.md for details
+# Root ARCHITECTURE.md is the source of truth
+/prep/
+
+# ============================================================================
+# External Reference Repository (6.1MB)
+# ============================================================================
+# Category: EXTERNAL DEPENDENCY REFERENCE (Medium future value)
+# Contains: Basenames protocol Solidity contracts, tests, deployment scripts
+# Consider: Adding as git submodule or external reference
+# See GITIGNORE-CATEGORIES.md for details
+/basenames-repo/
+
+# ============================================================================
+# Experimental/Test UI Projects
+# ============================================================================
+# Category: EXPERIMENTAL/TEST PROJECTS (Low future value)
+# Standalone Next.js apps for testing basename functionality
+# /basenames-sepolia-1/ (36KB) - Minimal wallet connection prototype
+# /basenames-sepolia-ui/ (80KB) - Basename registration/querying test UI
+# See GITIGNORE-CATEGORIES.md for details
+/basenames-sepolia-1/
+/basenames-sepolia-ui/
+
+# ============================================================================
+# V2 Migration Planning Docs (696KB)
+# ============================================================================
+# Category: FUTURE MIGRATION PLANNING (Medium-High future value)
+# Contains: V2 architecture specs, migration plans, comparison docs
+# Reference when planning v2 upgrade to unified Base Sepolia architecture
+# See GITIGNORE-CATEGORIES.md for details
+/v2-scaffolding/
 

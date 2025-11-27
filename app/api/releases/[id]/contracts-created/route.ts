@@ -30,20 +30,27 @@ export async function POST(
     console.log(`   Zora TX: ${zoraTxHash}`);
     console.log(`   Predicted Split Address: ${predictedSplitAddress}`);
 
-    // Get the curator address from the latest approval
-    const approvalResult = await query(
-      `SELECT signer FROM approvals WHERE "releaseId" = $1 ORDER BY timestamp DESC LIMIT 1`,
-      [releaseId]
-    );
-
-    if (approvalResult.rows.length === 0) {
-      return NextResponse.json(
-        { success: false, error: 'No approvals found for this release' },
-        { status: 400 }
+    // Get the curator address from request body or latest approval
+    let curatorAddress = body.curatorAddress;
+    
+    if (!curatorAddress) {
+      // Fall back to getting from approvals table
+      const approvalResult = await query(
+        `SELECT signer FROM approvals WHERE releaseid = $1 ORDER BY timestamp DESC LIMIT 1`,
+        [releaseId]
       );
-    }
 
-    const curatorAddress = approvalResult.rows[0].signer;
+      if (approvalResult.rows.length === 0) {
+        return NextResponse.json(
+          { success: false, error: 'No approvals found for this release and no curator address provided' },
+          { status: 400 }
+        );
+      }
+
+      curatorAddress = approvalResult.rows[0].signer;
+    }
+    
+    console.log(`   Curator: ${curatorAddress}`);
 
     // Extract Zora coin address from transaction receipt
     const { createPublicClient, http } = await import('viem');
@@ -85,7 +92,7 @@ export async function POST(
 
     // Update approvals with safeTxHash
     await query(
-      `UPDATE approvals SET safeTxHash = $1 WHERE "releaseId" = $2`,
+      `UPDATE approvals SET safetxhash = $1 WHERE releaseid = $2`,
       [safeTxHash, releaseId]
     );
 

@@ -15,20 +15,33 @@ dotenv.config({ path: '.env.local' })
 import { query as dbQuery } from '../db/database'
 import { ethers } from 'ethers'
 import SafeApiKit from '@safe-global/api-kit'
-import { sepolia } from 'viem/chains'
+import { baseSepolia } from 'viem/chains'
 
 const SAFE_ABI = [
   'function getOwners() external view returns (address[])',
   'function getThreshold() external view returns (uint256)',
 ]
 
-const provider = new ethers.JsonRpcProvider(process.env.SEPOLIA_RPC_URL!)
+// Lazy-loaded provider (Base Sepolia) - only created when needed
+let _provider: ethers.JsonRpcProvider | null = null
+function getProvider(): ethers.JsonRpcProvider {
+  if (!_provider) {
+    _provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL!)
+  }
+  return _provider
+}
 
-// Initialize Safe API Kit for querying Safe Transaction Service
-const apiKit = new SafeApiKit({
-  chainId: BigInt(sepolia.id),
-  apiKey: process.env.SAFE_API_KEY || '',
-})
+// Lazy-loaded Safe API Kit - only created when needed
+let _apiKit: SafeApiKit | null = null
+function getApiKit(): SafeApiKit {
+  if (!_apiKit) {
+    _apiKit = new SafeApiKit({
+      chainId: BigInt(baseSepolia.id),
+      apiKey: process.env.SAFE_API_KEY || '',
+    })
+  }
+  return _apiKit
+}
 
 /**
  * Get active Safe address for a wallet
@@ -178,7 +191,7 @@ export async function verifySafeOwnership(
   safeAddress: string
 ): Promise<boolean> {
   try {
-    const safe = new ethers.Contract(safeAddress, SAFE_ABI, provider) as any
+    const safe = new ethers.Contract(safeAddress, SAFE_ABI, getProvider()) as any
     const owners = (await safe.getOwners()) as string[]
 
     return owners
@@ -199,10 +212,10 @@ export async function detectSafesForWallet(
 ): Promise<string[]> {
   try {
     console.log(`\n🔍 [DYNAMIC DISCOVERY] Querying Safe Transaction Service API for wallet: ${walletAddress}`)
-    console.log(`   API Kit configured for chain: ${sepolia.id} (Sepolia)`)
+    console.log(`   API Kit configured for chain: ${baseSepolia.id} (Base Sepolia)`)
     
     // Use SafeApiKit's getSafesByOwner method
-    const safesResponse = await apiKit.getSafesByOwner(walletAddress)
+    const safesResponse = await getApiKit().getSafesByOwner(walletAddress)
     
     console.log(`   API Response:`, JSON.stringify(safesResponse, null, 2))
     
@@ -217,7 +230,7 @@ export async function detectSafesForWallet(
     } else {
       console.log(`⚠️ [DYNAMIC DISCOVERY] No Safes found for wallet ${walletAddress}`)
       console.log(`   This could mean:`)
-      console.log(`   - Wallet has never created/interacted with a Safe on Sepolia`)
+      console.log(`   - Wallet has never created/interacted with a Safe on Base Sepolia`)
       console.log(`   - Safe Transaction Service hasn't indexed this wallet's Safes yet`)
     }
     

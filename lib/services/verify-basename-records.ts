@@ -8,12 +8,16 @@
  *   npx tsx lib/services/verify-basename-records.ts eros006.scenius.basetest.eth
  */
 
+// Load .env.local if available (optional - script works without it using public RPC)
 import dotenv from 'dotenv';
 dotenv.config({ path: '.env.local' });
 
 import { createPublicClient, http, decodeFunctionResult, encodeFunctionData } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { namehash } from 'viem/ens';
+
+// Default public Base Sepolia RPC (fallback if BASE_RPC_URL not set)
+const DEFAULT_BASE_RPC_URL = 'https://sepolia.base.org';
 
 const RESOLVER_ADDRESS = process.env.ENS_RESOLVER_BASE_SEPOLIA || '0x85C87e548091f204C2d0350b39ce1874f02197c6';
 const REGISTRY_ADDRESS = '0x1493b2567056c2181630115660963E13A8E32735'; // Base Sepolia Registry
@@ -77,9 +81,11 @@ const RESOLVER_NAME_ABI = [
   },
 ] as const;
 
+const RPC_URL = process.env.BASE_RPC_URL || DEFAULT_BASE_RPC_URL;
+
 const publicClient = createPublicClient({
   chain: baseSepolia,
-  transport: http(process.env.BASE_RPC_URL!),
+  transport: http(RPC_URL),
 });
 
 // Expected records based on buildRecordsFromRelease

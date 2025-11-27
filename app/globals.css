@@ -65,8 +65,8 @@
 }
 
 @theme inline {
-  --font-sans: "Geist", "Geist Fallback";
-  --font-mono: "Geist Mono", "Geist Mono Fallback";
+  --font-sans: var(--font-inconsolata), "Inconsolata", monospace;
+  --font-mono: var(--font-mono, "Geist Mono"), monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -110,6 +110,8 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply text-foreground;
+    /* Background image applied via layout.tsx inline styles */
+    background-color: transparent;
   }
 }

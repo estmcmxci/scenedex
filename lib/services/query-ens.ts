@@ -21,19 +21,67 @@ dotenv.config({ path: '.env.local' });
 
 import { createPublicClient, http } from 'viem';
 import { baseSepolia } from 'viem/chains';
-import { normalize } from 'viem/ens';
+import { normalize, namehash } from 'viem/ens';
 
 // ============================================================================
-// PART 1: Initialize Viem Public Client
+// PART 1: Initialize Viem Public Client & Contract Addresses
 // ============================================================================
 // Creates a read-only client to query Base Sepolia blockchain
 // - No private key needed (read-only operations)
 // - Uses BASE_RPC_URL from .env.local (Alchemy/Infura endpoint)
 // - Connects to Base Sepolia testnet where our Basenames are registered
+
+// Default public Base Sepolia RPC (fallback if BASE_RPC_URL not set)
+const DEFAULT_BASE_RPC_URL = 'https://sepolia.base.org';
+const RPC_URL = process.env.BASE_RPC_URL || DEFAULT_BASE_RPC_URL;
+
 const publicClient = createPublicClient({
   chain: baseSepolia,
-  transport: http(process.env.BASE_RPC_URL!),
+  transport: http(RPC_URL),
 });
+
+// Base Sepolia ENS contract addresses
+// These are DIFFERENT from mainnet ENS - Base Sepolia has its own registry
+const REGISTRY_ADDRESS = '0x1493b2567056c2181630115660963E13A8E32735' as const;
+const RESOLVER_ADDRESS = (process.env.ENS_RESOLVER_BASE_SEPOLIA || '0x85C87e548091f204C2d0350b39ce1874f02197c6') as `0x${string}`;
+
+// ABIs for direct contract queries (Universal Resolver not available on Base Sepolia)
+const REGISTRY_ABI = [
+  {
+    name: 'resolver',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'node', type: 'bytes32' }],
+    outputs: [{ name: 'resolver', type: 'address' }],
+  },
+  {
+    name: 'owner',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'node', type: 'bytes32' }],
+    outputs: [{ name: 'owner', type: 'address' }],
+  },
+] as const;
+
+const RESOLVER_ABI = [
+  {
+    name: 'addr',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'node', type: 'bytes32' }],
+    outputs: [{ name: 'addr', type: 'address' }],
+  },
+  {
+    name: 'text',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'node', type: 'bytes32' },
+      { name: 'key', type: 'string' },
+    ],
+    outputs: [{ name: 'value', type: 'string' }],
+  },
+] as const;
 
 // ============================================================================
 // PART 2: Define Custom Text Record Keys
@@ -117,18 +165,34 @@ async function queryScenedexRelease(ensName: string) {
   const normalizedName = normalize(ensName);
   console.log(`✅ Normalized name: ${normalizedName}\n`);
   
+  // Calculate the namehash for direct contract queries
+  const node = namehash(normalizedName);
+  
   try {
     // ========================================================================
-    // Step 1: Get the resolver address
+    // Step 1: Get the resolver address from Registry (direct query)
     // ========================================================================
-    // ENS names point to a "resolver" contract that stores the actual data
-    // Without a resolver, the name exists but has no records
-    console.log(`📋 Step 1: Fetching resolver contract...`);
-    const resolver = await publicClient.getEnsResolver({
-      name: normalizedName,
-    });
+    // On Base Sepolia, we can't use viem's getEnsResolver() because
+    // it relies on the Universal Resolver which isn't deployed there.
+    // Instead, we query the Registry contract directly.
+    console.log(`📋 Step 1: Fetching resolver from Registry...`);
+    console.log(`   Node hash: ${node}`);
     
-    if (!resolver) {
+    let resolverAddress: string;
+    try {
+      resolverAddress = await publicClient.readContract({
+        address: REGISTRY_ADDRESS,
+        abi: REGISTRY_ABI,
+        functionName: 'resolver',
+        args: [node],
+      });
+    } catch (error) {
+      console.log(`   ❌ Failed to query registry: ${error instanceof Error ? error.message : String(error)}`);
+      resolverAddress = '0x0000000000000000000000000000000000000000';
+    }
+    
+    const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+    if (resolverAddress === ZERO_ADDRESS) {
       console.log(`   No resolver (name not registered)\n`);
       // Return early with minimal data - name doesn't exist
       return {
@@ -151,48 +215,71 @@ async function queryScenedexRelease(ensName: string) {
         },
       };
     }
-    console.log(`   Resolver: ${resolver}\n`);
+    console.log(`   Resolver: ${resolverAddress}\n`);
     
     // ========================================================================
-    // Step 2: Query primary address record
+    // Step 2: Query primary address record (direct resolver query)
     // ========================================================================
     // The "addr" record is the main Ethereum address this name resolves to
     // This is what wallets use when you send ETH to an ENS name
     console.log(`📋 Step 2: Querying primary address (addr record)...`);
-    const primaryAddress = await publicClient.getEnsAddress({
-      name: normalizedName,
-    });
+    let primaryAddress: string | null = null;
+    try {
+      const addr = await publicClient.readContract({
+        address: resolverAddress as `0x${string}`,
+        abi: RESOLVER_ABI,
+        functionName: 'addr',
+        args: [node],
+      });
+      primaryAddress = addr === ZERO_ADDRESS ? null : addr;
+    } catch (error) {
+      console.log(`   ⚠️ Could not query addr: ${error instanceof Error ? error.message : String(error)}`);
+    }
     console.log(`   Primary Address: ${primaryAddress || 'Not set'}\n`);
     
     // ========================================================================
-    // Step 3: Query standard ENS text records
+    // Step 3: Query standard ENS text records (direct resolver query)
     // ========================================================================
     console.log(`📋 Step 3: Querying standard ENS text records...`);
     const standardRecords: Record<string, string | null> = {};
     
     for (const [key, recordKey] of Object.entries(STANDARD_ENS_KEYS)) {
-      const value = await publicClient.getEnsText({
-        name: normalizedName,
-        key: recordKey,
-      });
-      standardRecords[key] = value;
-      console.log(`   ${recordKey}: ${value || 'Not set'}`);
+      try {
+        const value = await publicClient.readContract({
+          address: resolverAddress as `0x${string}`,
+          abi: RESOLVER_ABI,
+          functionName: 'text',
+          args: [node, recordKey],
+        });
+        standardRecords[key] = value && value !== '' ? value : null;
+        console.log(`   ${recordKey}: ${value || 'Not set'}`);
+      } catch (error) {
+        standardRecords[key] = null;
+        console.log(`   ${recordKey}: ⚠️ Error querying`);
+      }
     }
     console.log();
     
     // ========================================================================
-    // Step 4: Query custom Scenedex text records
+    // Step 4: Query custom Scenedex text records (direct resolver query)
     // ========================================================================
     console.log(`📋 Step 4: Querying custom Scenedex records (eth.scenedex.*)...`);
     const scenedexRecords: Record<string, string | null> = {};
     
     for (const [key, recordKey] of Object.entries(SCENEDEX_RECORD_KEYS)) {
-      const value = await publicClient.getEnsText({
-        name: normalizedName,
-        key: recordKey,
-      });
-      scenedexRecords[key] = value;
-      console.log(`   ${recordKey}: ${value || 'Not set'}`);
+      try {
+        const value = await publicClient.readContract({
+          address: resolverAddress as `0x${string}`,
+          abi: RESOLVER_ABI,
+          functionName: 'text',
+          args: [node, recordKey],
+        });
+        scenedexRecords[key] = value && value !== '' ? value : null;
+        console.log(`   ${recordKey}: ${value || 'Not set'}`);
+      } catch (error) {
+        scenedexRecords[key] = null;
+        console.log(`   ${recordKey}: ⚠️ Error querying`);
+      }
     }
     console.log();
     
@@ -201,7 +288,7 @@ async function queryScenedexRelease(ensName: string) {
     // ========================================================================
     return {
       ensName: normalizedName,
-      resolver,
+      resolver: resolverAddress,
       primaryAddress,
       standard: standardRecords,
       scenedex: scenedexRecords,

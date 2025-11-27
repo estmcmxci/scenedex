@@ -2,7 +2,7 @@
  * GET /api/releases
  * 
  * Dynamically discovers published releases by querying ENS
- * Starts from SOMA011.scenedex.eth and increments until no more releases found
+ * Starts from ARES001 and increments until no more releases found
  * 
  * Features:
  * - ENS as source of truth (no database dependency)
@@ -12,14 +12,20 @@
  */
 
 import { NextResponse } from 'next/server';
+
+// Prevent static generation - this route requires runtime ENS queries
+export const dynamic = 'force-dynamic';
 import { queryScenedexRelease } from '@/lib/services/query-ens';
+import { query as dbQuery } from '@/lib/db/database';
 
 // Configuration
-const START_NUMBER = 11; // Start from SOMA011
+// Start from ARES001 - this is where our published releases begin
+// In production, you might want to start from 1 or use a database to track the range
+const START_NUMBER = parseInt(process.env.ENS_START_NUMBER || '1', 10);
 const MAX_RELEASES = 50; // Safety limit
-const MAX_CONSECUTIVE_FAILURES = 3; // Stop after 3 missing names in a row
-const ENS_PREFIX = process.env.ENS_SUBNAME_PREFIX || 'SOMA';
-const ENS_PARENT = 'scenedex.eth';
+const MAX_CONSECUTIVE_FAILURES = 5; // Stop after 5 missing names in a row (increased for gaps)
+const ENS_PREFIX = process.env.ENS_SUBNAME_PREFIX || 'ARES';
+const ENS_PARENT = process.env.ENS_DOMAIN || 'scenius.basetest.eth';
 
 // Next.js route segment config - enable caching
 export const revalidate = 300; // Revalidate every 5 minutes (300 seconds)
@@ -36,7 +42,7 @@ export async function GET() {
     let consecutiveFailures = 0;
     let queriesCount = 0;
 
-    // Start from SOMA011 and increment
+    // Start from ARES001 and increment
     for (let i = START_NUMBER; i < START_NUMBER + MAX_RELEASES; i++) {
       const paddedNumber = String(i).padStart(3, '0'); // 011, 012, 013...
       const ensName = `${ENS_PREFIX}${paddedNumber}.${ENS_PARENT}`.toLowerCase();
@@ -61,8 +67,10 @@ export async function GET() {
           continue; // Skip to next iteration
         }
         
-        // Check if release has actual data (zoraCoinAddress is required)
-        if (!releaseData.scenedex.zoraCoinAddress) {
+        // Check if release has actual data (zoraCoinAddress is required and must not be zero address)
+        const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+        const zoraCoinAddress = releaseData.scenedex.zoraCoinAddress;
+        if (!zoraCoinAddress || zoraCoinAddress === ZERO_ADDRESS) {
           consecutiveFailures++;
           console.log(`   ⏭️  No Zora coin (not published) - Failure ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}`);
           
@@ -75,9 +83,29 @@ export async function GET() {
         }
         
         // Name exists AND has data, extract it
+        const releaseId = releaseData.scenedex.releaseId || `${ENS_PREFIX}${paddedNumber}`;
+        
+        // Try to get additional data from database (approvedAt, publisher)
+        let approvedAt: number | null = null;
+        let publisherAddress: string | null = null;
+        try {
+          const dbResult = await dbQuery(
+            `SELECT approvedat, multisigaddress FROM releases WHERE id = $1`,
+            [releaseId]
+          );
+          if (dbResult.rows.length > 0) {
+            const dbRelease = dbResult.rows[0];
+            // approvedAt is stored as Unix seconds, convert to milliseconds
+            approvedAt = dbRelease.approvedat ? dbRelease.approvedat * 1000 : null;
+            publisherAddress = dbRelease.multisigaddress || null;
+          }
+        } catch (dbError) {
+          console.log(`   Could not fetch DB data for ${releaseId}:`, dbError);
+        }
+        
         const release = {
           ensName: releaseData.ensName,
-          releaseId: releaseData.scenedex.releaseId || `${ENS_PREFIX}${paddedNumber}`,
+          releaseId,
           title: releaseData.scenedex.releaseId || ensName,
           artists: releaseData.scenedex.artists,
           description: releaseData.standard.description,
@@ -88,17 +116,9 @@ export async function GET() {
           zoraCoinSymbol: releaseData.scenedex.zoraCoinSymbol,
           splitAddress: releaseData.scenedex.splitAddress,
           creatorAddress: releaseData.primaryAddress, // Creator/submitter from ENS address record
+          approvedAt, // From database (for older releases without metadata)
+          publisherAddress, // From database (Safe address)
         };
-        
-        // Filter out everything before SOMA013 (SOMA000-012)
-        const releaseMatch = release.releaseId.match(/SOMA(\d+)/i);
-        if (releaseMatch) {
-          const releaseNumber = parseInt(releaseMatch[1], 10);
-          if (releaseNumber < 13) {
-            console.log(`   ⏭️  Skipping ${release.releaseId} (before SOMA013)`);
-            continue;
-          }
-        }
         
         releases.push(release);
         consecutiveFailures = 0; // Reset failure counter on success

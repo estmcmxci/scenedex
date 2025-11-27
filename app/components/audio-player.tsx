@@ -13,6 +13,73 @@ export function AudioPlayer({ audioUrl }: AudioPlayerProps) {
   const [progress, setProgress] = useState(0)
   const [duration, setDuration] = useState(0)
   const [isDragging, setIsDragging] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [blobUrl, setBlobUrl] = useState<string | null>(null)
+
+  // Fetch audio as blob to avoid CORS/browser security issues with IPFS gateways
+  useEffect(() => {
+    if (!audioUrl) {
+      setError('No audio URL provided')
+      setIsLoading(false)
+      return
+    }
+
+    let cancelled = false
+    const controller = new AbortController()
+
+    async function fetchAudioBlob() {
+      setIsLoading(true)
+      setError(null)
+      
+      // Clean up previous blob URL
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl)
+        setBlobUrl(null)
+      }
+
+      try {
+        console.log('Fetching audio from:', audioUrl)
+        const response = await fetch(audioUrl, { 
+          signal: controller.signal,
+          mode: 'cors',
+        })
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+        }
+        
+        const blob = await response.blob()
+        
+        if (cancelled) return
+        
+        const url = URL.createObjectURL(blob)
+        console.log('Created blob URL:', url)
+        setBlobUrl(url)
+      } catch (err) {
+        if (cancelled) return
+        console.error('Failed to fetch audio:', err)
+        setError(err instanceof Error ? err.message : 'Failed to load audio')
+        setIsLoading(false)
+      }
+    }
+
+    fetchAudioBlob()
+
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
+  }, [audioUrl])
+
+  // Clean up blob URL on unmount
+  useEffect(() => {
+    return () => {
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl)
+      }
+    }
+  }, [blobUrl])
 
   useEffect(() => {
     const audio = audioRef.current
@@ -26,25 +93,53 @@ export function AudioPlayer({ audioUrl }: AudioPlayerProps) {
 
     const setAudioDuration = () => {
       setDuration(audio.duration)
+      setIsLoading(false)
+      setError(null)
+    }
+
+    const handleError = (e: Event) => {
+      console.error('Audio element error:', e)
+      const audioEl = e.target as HTMLAudioElement
+      if (audioEl.error) {
+        console.error('Audio error code:', audioEl.error.code)
+        console.error('Audio error message:', audioEl.error.message)
+      }
+      setError('Failed to play audio')
+      setIsLoading(false)
+    }
+
+    const handleCanPlay = () => {
+      setIsLoading(false)
+      setError(null)
     }
 
     audio.addEventListener("timeupdate", updateProgress)
     audio.addEventListener("loadedmetadata", setAudioDuration)
+    audio.addEventListener("error", handleError)
+    audio.addEventListener("canplay", handleCanPlay)
 
     return () => {
       audio.removeEventListener("timeupdate", updateProgress)
       audio.removeEventListener("loadedmetadata", setAudioDuration)
+      audio.removeEventListener("error", handleError)
+      audio.removeEventListener("canplay", handleCanPlay)
     }
-  }, [isDragging])
+  }, [isDragging, blobUrl])
 
-  const togglePlay = () => {
+  const togglePlay = async () => {
     if (audioRef.current) {
       if (isPlaying) {
         audioRef.current.pause()
+        setIsPlaying(false)
       } else {
-        audioRef.current.play()
+        try {
+          await audioRef.current.play()
+          setIsPlaying(true)
+        } catch (err) {
+          console.error('Play error:', err)
+          setError('Failed to play audio')
+        }
       }
-      setIsPlaying(!isPlaying)
     }
   }
 
@@ -92,37 +187,52 @@ export function AudioPlayer({ audioUrl }: AudioPlayerProps) {
         window.removeEventListener("mouseup", handleMouseUp)
       }
     }
+    return undefined
   }, [isDragging, handleMouseMove, handleMouseUp])
 
   return (
-    <div className="border border-white p-4 bg-black">
-      <audio ref={audioRef} src={audioUrl} />
+    <div className="border border-white/30 p-4 rounded bg-transparent">
+      {blobUrl && (
+        <audio 
+          ref={audioRef} 
+          src={blobUrl} 
+          preload="metadata"
+        />
+      )}
 
       <div className="flex items-center gap-4">
         <button
           onClick={togglePlay}
-          className="w-12 h-12 flex items-center justify-center border border-white hover:bg-white hover:text-black transition-colors"
+          disabled={isLoading || !!error}
+          className={`w-12 h-12 flex items-center justify-center border border-white/30 transition-colors ${
+            isLoading || error 
+              ? 'opacity-50 cursor-not-allowed' 
+              : 'hover:bg-white/10 hover:border-white/50'
+          }`}
         >
-          {isPlaying ? "II" : "▶"}
+          {isLoading ? "..." : error ? "✕" : isPlaying ? "II" : "▶"}
         </button>
 
         <div className="flex-1">
-          <div className="flex justify-between text-xs font-mono mb-1 text-gray-400">
+          <div className="flex justify-between text-xs font-mono mb-1 text-white/60">
             <span>{formatTime(audioRef.current?.currentTime || 0)}</span>
             <span>{formatTime(duration)}</span>
           </div>
           <div
             ref={progressBarRef}
             onMouseDown={handleMouseDown}
-            className="h-2 bg-gray-900 w-full relative cursor-pointer group"
+            className="h-2 bg-white/10 w-full relative cursor-pointer group"
           >
             <div
-              className="absolute top-0 left-0 h-full bg-white group-hover:bg-gray-300 transition-colors"
+              className="absolute top-0 left-0 h-full bg-white/60 group-hover:bg-white/80 transition-colors"
               style={{ width: `${progress}%` }}
             />
           </div>
         </div>
       </div>
+      {error && (
+        <div className="mt-2 text-xs text-red-400">{error}</div>
+      )}
     </div>
   )
 }

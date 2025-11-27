@@ -27,6 +27,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifyCuratorSignature, isSafeMember, getApprovalThreshold, getSafeAddress } from '@/lib/services/safe';
 import { createApproval, countApprovalsForRelease, hasApprovalFromSigner, getSafeTxHashForRelease } from '@/lib/db/approvals';
 import { publishReleaseViaSafe } from '@/lib/services/jobs';
+import { query as dbQuery } from '@/lib/db/database';
 
 export async function POST(request: NextRequest) {
   try {
@@ -168,31 +169,28 @@ export async function POST(request: NextRequest) {
     console.log('\nStep 1️⃣0️⃣: Check if threshold met');
     const thresholdMet = approvalCount >= threshold;
 
-    let safeTxHash: string | null = null;
-    let contractTxData: any = null;
-    
     if (thresholdMet) {
       console.log(`✅ THRESHOLD MET! (${approvalCount}/${threshold})`);
-      console.log(`\n🚀 Threshold met - returning transaction data for client-side execution`);
+      console.log(`\n🚀 Threshold met - ready for contract creation`);
       
-      // Get transaction data for split and Zora coin creation
-      // These will be signed and sent by the curator's connected wallet
+      // Set approvedAt and multisigAddress for publisher proof, but keep status as 'pending'
+      // Status will change to 'published' only after contracts are actually created
+      const now = Math.floor(Date.now() / 1000); // Unix seconds
       try {
-        const txDataResponse = await fetch(
-          `${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/releases/${releaseId}/contract-tx-data`
+        await dbQuery(
+          `UPDATE releases 
+           SET approvedat = $1, multisigaddress = $2
+           WHERE id = $3`,
+          [now, safeAddress, releaseId]
         );
-        const txDataResult = await txDataResponse.json();
-        
-        if (txDataResult.success) {
-          contractTxData = txDataResult.data;
-          console.log(`✅ Contract transaction data prepared`);
-        } else {
-          console.warn(`⚠️ Failed to get contract transaction data: ${txDataResult.error}`);
-        }
+        console.log(`✅ Publisher proof set: approvedAt=${new Date(now * 1000).toISOString()}, publisher=${safeAddress}`);
+        console.log(`   Status remains 'pending' until contracts are created`);
       } catch (error) {
-        console.warn(`⚠️ Error fetching contract transaction data:`, error);
-        // Continue - client can retry
+        console.warn('⚠️ Could not set publisher proof:', error);
       }
+      
+      // Don't change status or auto-trigger publish - let curator click "Create Contracts" button
+      // Status changes to 'published' only after contracts are successfully created
     } else {
       console.log(`⏳ Threshold not met yet: ${approvalCount}/${threshold}`);
     }
@@ -210,9 +208,8 @@ export async function POST(request: NextRequest) {
           approvalCount,
           threshold,
           thresholdMet,
-          contractTxData: contractTxData || undefined, // Transaction data for split/Zora creation
           message: thresholdMet
-            ? `✅ Threshold met! Please sign the contract creation transactions.`
+            ? `✅ Threshold met! Click "Create Contracts" to publish the release.`
             : `⏳ Approval stored. ${threshold - approvalCount} more approval(s) needed.`,
         },
       },

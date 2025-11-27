@@ -151,14 +151,27 @@ export async function POST(request: NextRequest) {
         if (tempSubmission.rows.length > 0) {
           const submission = tempSubmission.rows[0]
           
+          // Get Safe address for publisher info
+          let safeAddr: string | null = null
+          try {
+            safeAddr = await getSafeAddress()
+          } catch (e) {
+            console.warn('Could not get Safe address for release metadata')
+          }
+          
           // Releases record already exists from submit endpoint, but ensure it has all metadata
+          // Also set approvedAt and multisigAddress for publisher proof
+          const now = Math.floor(Date.now() / 1000) // Unix seconds
           await dbQuery(
             `UPDATE releases 
-             SET title = $1, description = $2, artists = $3, status = 'approved'
-             WHERE id = $4`,
-            [submission.title, submission.description, submission.artists, releaseId]
+             SET title = $1, description = $2, artists = $3, status = 'approved', 
+                 approvedat = $4, multisigaddress = $5
+             WHERE id = $6`,
+            [submission.title, submission.description, submission.artists, now, safeAddr, releaseId]
           )
           console.log(`✅ Release metadata updated from temporary_submissions`)
+          console.log(`   Approved at: ${new Date(now * 1000).toISOString()}`)
+          console.log(`   Publisher: ${safeAddr}`)
         }
       } catch (error) {
         console.error('Error copying metadata:', error)

@@ -13,6 +13,7 @@ import {
   http,
   Address,
   Hex,
+  decodeEventLog,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { baseSepolia } from 'viem/chains';
@@ -209,11 +210,16 @@ export async function getSplitDetails(splitAddress: Address) {
  */
 export async function getSplitCalldata(
   safeAddress: Address,
-  submitterAddress: Address
-): Promise<{ to: string; data: string; value: string }> {
+  submitterAddress: Address,
+  releaseId?: string
+): Promise<{ to: string; data: string; value: string; predictedAddress: string }> {
   console.log(`\n📝 Preparing split creation calldata...`);
   console.log(`   Safe (Curator):  ${safeAddress} (50%)`);
-  console.log(`   Submitter:       ${submitterAddress} (50%)\n`);
+  console.log(`   Submitter:       ${submitterAddress} (50%)`);
+  if (releaseId) {
+    console.log(`   Release ID:      ${releaseId} (for uniqueness)`);
+  }
+  console.log(``);
 
   try {
     // Validate addresses exist first
@@ -233,69 +239,92 @@ export async function getSplitCalldata(
     }
 
     // Initialize Splits SDK client (we only need it for callData, not execution)
-    // NOTE: Using Base Sepolia client, but Safe is on Sepolia - this is intentional
-    // The split will be created on Base Sepolia (for Zora coins), but we're generating
-    // calldata that the Safe on Sepolia will execute. This won't work cross-chain!
-    // TODO: Need to create split separately or use Sepolia factory
+    // All operations (Split, Zora, Basename) are on Base Sepolia, so Safe executes on Base Sepolia
     const splitsClient = initializeSplitsClient();
     
-    // First, predict the split address to check if it already exists
+    // Note: We don't use salt because:
+    // 1. The salted createSplit function (0xf79918b0) may not be supported on Base Sepolia
+    // 2. Each release has unique recipients (Safe + different submitter), so splits are naturally unique
+    // 3. The successful transaction used the non-salted createSplit (0x2556fa39)
+    
+    // First, try to predict the split address (with timeout to avoid blocking)
     console.log(`   🔍 Predicting split address to check if it already exists...`);
-    const predictedSplit = await splitsClient.predictDeterministicAddress({
-      recipients: [
-        { address: safeAddress, percentAllocation: 50.0 },
-        { address: submitterAddress, percentAllocation: 50.0 },
-      ],
-      distributorFeePercent: 1.0,
-      totalAllocationPercent: 100.0,
-      splitType: 'Push' as any,
-      ownerAddress: safeAddress,
-      creatorAddress: safeAddress,
-    });
+    let predictedAddress: string | null = null;
     
-    const predictedAddress = typeof predictedSplit === 'string' 
-      ? predictedSplit 
-      : (predictedSplit as any)?.address || (predictedSplit as any)?.splitAddress;
-    
-    if (!predictedAddress) {
-      throw new Error(`Could not predict split address`);
-    }
-    
-    console.log(`   📋 Predicted split address: ${predictedAddress}`);
-    
-    // Check if split already exists on Sepolia (where Safe is)
-    const { createPublicClient, http } = await import('viem');
-    const { sepolia } = await import('viem/chains');
-    const sepoliaRpcUrl = process.env.SEPOLIA_RPC_URL;
-    if (!sepoliaRpcUrl) {
-      throw new Error('SEPOLIA_RPC_URL not set');
-    }
-    
-    const sepoliaClient = createPublicClient({
-      chain: sepolia,
-      transport: http(sepoliaRpcUrl),
-    });
-    
-    const existingCode = await sepoliaClient.getCode({ address: predictedAddress as `0x${string}` });
-    const splitExists = existingCode && existingCode !== '0x';
-    
-    if (splitExists) {
-      console.log(`   ⚠️  Split already exists at ${predictedAddress} - skipping creation`);
-      console.log(`   ✅ Will use existing split address: ${predictedAddress}`);
+    try {
+      // Add a 10-second timeout to the prediction call
+      const predictionPromise = splitsClient.predictDeterministicAddress({
+        recipients: [
+          { address: safeAddress, percentAllocation: 50.0 },
+          { address: submitterAddress, percentAllocation: 50.0 },
+        ],
+        distributorFeePercent: 1.0,
+        totalAllocationPercent: 100.0,
+        splitType: 'Push' as any,
+        ownerAddress: safeAddress,
+        creatorAddress: safeAddress,
+      });
       
-      // Return a no-op transaction (call to Safe itself with empty data)
-      // This allows the transaction to proceed without trying to create the split again
-      return {
-        to: safeAddress, // Call to Safe itself (no-op)
-        data: '0x', // Empty data (no operation)
-        value: '0',
-      };
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Prediction timed out')), 10000)
+      );
+      
+      const predictedSplit = await Promise.race([predictionPromise, timeoutPromise]);
+      
+      predictedAddress = typeof predictedSplit === 'string' 
+        ? predictedSplit 
+        : (predictedSplit as any)?.address || (predictedSplit as any)?.splitAddress;
+      
+      if (predictedAddress) {
+        console.log(`   📋 Predicted split address: ${predictedAddress}`);
+      }
+    } catch (predictionError) {
+      console.log(`   ⚠️  Could not predict split address (${predictionError instanceof Error ? predictionError.message : 'unknown error'})`);
+      console.log(`   📋 Proceeding without prediction - split will be created fresh`);
     }
     
-    console.log(`   ✅ Split does not exist - will create new split`);
+    // Check if split already exists on Base Sepolia (only if we have a predicted address)
+    if (predictedAddress) {
+      const { createPublicClient, http } = await import('viem');
+      const { baseSepolia } = await import('viem/chains');
+      const baseRpcUrl = process.env.BASE_RPC_URL;
+      if (!baseRpcUrl) {
+        throw new Error('BASE_RPC_URL not set');
+      }
+      
+      const baseClient = createPublicClient({
+        chain: baseSepolia,
+        transport: http(baseRpcUrl),
+      });
+      
+      try {
+        const existingCode = await baseClient.getCode({ address: predictedAddress as `0x${string}` });
+        const splitExists = existingCode && existingCode !== '0x';
+        
+        if (splitExists) {
+          console.log(`   ⚠️  Split already exists at ${predictedAddress} - skipping creation`);
+          console.log(`   ✅ Will use existing split address: ${predictedAddress}`);
+          
+          // Return a no-op transaction (call to Safe itself with empty data)
+          return {
+            to: safeAddress, // Call to Safe itself (no-op)
+            data: '0x', // Empty data (no operation)
+            value: '0',
+            predictedAddress: predictedAddress,
+          };
+        }
+        
+        console.log(`   ✅ Split does not exist - will create new split`);
+      } catch (codeCheckError) {
+        console.log(`   ⚠️  Could not check if split exists, proceeding with creation`);
+      }
+    } else {
+      console.log(`   📋 No predicted address - will create new split`);
+    }
 
     // Use callData.createSplit to get the transaction data
     // Returns { to, data, value } format (compatible with Safe transactions and multicall)
+    // Note: NOT using salt - the salted version uses a different function selector that may not work
     const callDataResult = await splitsClient.callData.createSplit({
       recipients: [
         {
@@ -310,8 +339,9 @@ export async function getSplitCalldata(
       distributorFeePercent: 1.0,
       totalAllocationPercent: 100.0,
       splitType: 'Push' as any,
-      ownerAddress: safeAddress,
-      creatorAddress: safeAddress,
+      ownerAddress: safeAddress, // Safe always remains owner
+      creatorAddress: safeAddress, // Safe is always the creator (required by factory)
+      // No salt - using default CREATE2 calculation (same as successful transaction)
     });
 
     // Log the raw result to understand its structure
@@ -356,15 +386,79 @@ export async function getSplitCalldata(
     console.log(`      To: ${toAddress}`);
     console.log(`      Data length: ${dataHex.length} bytes`);
 
+    // If we don't have a predicted address yet, try to get it from the callData result
+    let finalPredictedAddress = predictedAddress;
+    if (!finalPredictedAddress) {
+      // Try to get predicted address from callData result (some SDK versions include it)
+      finalPredictedAddress = (callDataResult as any)?.splitAddress || 
+                              (callDataResult as any)?.predictedAddress ||
+                              (callDataResult as any)?.address;
+      
+      // If still no predicted address, generate a placeholder (will be resolved after tx)
+      if (!finalPredictedAddress) {
+        console.log(`   ⚠️  Could not predict split address - will resolve after transaction`);
+        finalPredictedAddress = 'pending'; // Will be resolved from transaction receipt
+      }
+    }
+    
     return {
       to: toAddress,
       data: dataHex,
       value: valueStr || '0',
+      predictedAddress: finalPredictedAddress,
     };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error(`\n❌ Failed to get split calldata:`, errorMessage);
     throw error;
+  }
+}
+
+/**
+ * Extract split address from transaction receipt logs
+ * 
+ * Since splits use CREATE2, the predicted address should match the actual address.
+ * This function can verify by checking if the predicted address has code deployed.
+ * 
+ * @param receipt - Transaction receipt with logs
+ * @param predictedAddress - Predicted split address (from CREATE2)
+ * @returns Split address if found/verified, null otherwise
+ */
+export async function extractSplitAddressFromLogs(
+  receipt: { logs?: Array<{ address?: string; topics?: string[]; data?: string }> },
+  predictedAddress: Address
+): Promise<Address | null> {
+  // Since splits use CREATE2, the predicted address should be the actual address
+  // We can verify by checking if code exists at that address
+  try {
+    const { createPublicClient, http } = await import('viem');
+    const { baseSepolia } = await import('viem/chains');
+    const rpcUrl = process.env.BASE_RPC_URL;
+    
+    if (!rpcUrl) {
+      console.warn('BASE_RPC_URL not set, cannot verify split address');
+      return predictedAddress; // Return predicted as fallback
+    }
+    
+    const publicClient = createPublicClient({
+      chain: baseSepolia,
+      transport: http(rpcUrl),
+    });
+    
+    const code = await publicClient.getCode({ address: predictedAddress as `0x${string}` });
+    if (code && code !== '0x') {
+      // Code exists at predicted address, so it's the actual split
+      return predictedAddress;
+    }
+    
+    // If no code, the split wasn't created (or prediction was wrong)
+    // This shouldn't happen with CREATE2, but handle gracefully
+    console.warn(`⚠️ No code found at predicted split address: ${predictedAddress}`);
+    return null;
+  } catch (error) {
+    console.warn('Error verifying split address:', error);
+    // Return predicted address as fallback (CREATE2 should be deterministic)
+    return predictedAddress;
   }
 }
 

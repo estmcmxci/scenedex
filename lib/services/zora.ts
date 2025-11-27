@@ -18,6 +18,8 @@ import {
   keccak256,
   encodePacked,
   encodeFunctionData,
+  decodeEventLog,
+  decodeAbiParameters,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
@@ -135,7 +137,8 @@ export async function createCoinForRelease(
 
     // Convert IPFS URI to w3s.link gateway URL
     // Format: https://{cid}.ipfs.w3s.link/{releaseId}-{filename}
-    const metadataGatewayUrl = metadataURI.startsWith('ipfs://')
+    // Note: The successful transaction used gateway URLs, so we'll keep this format
+    const finalMetadataURI = metadataURI.startsWith('ipfs://')
       ? `https://${metadataURI.replace('ipfs://', '')}.ipfs.w3s.link/${releaseId}-${metadataFilename}`
       : metadataURI;
 
@@ -143,7 +146,7 @@ export async function createCoinForRelease(
     console.log(`   Symbol:   ${coinSymbol}`);
     console.log(`   Payout:   ${splitAddress}`);
     console.log(`   Creator:  ${creatorAddress}`);
-    console.log(`   Gateway URL: ${metadataGatewayUrl}`);
+    console.log(`   Metadata URI: ${finalMetadataURI}`);
     console.log(`✅ Coin parameters ready`);
 
     // Step 3: Generate pool config for ETH pair
@@ -177,7 +180,7 @@ export async function createCoinForRelease(
       args: [
         splitAddress,            // payoutRecipient (split contract)
         [creatorAddress],        // owners (array)
-        metadataGatewayUrl,      // uri (HTTP gateway URL)
+        finalMetadataURI,        // uri (IPFS URI - preferred format per docs)
         title,                   // name
         coinSymbol,              // symbol
         poolConfig,              // poolConfig (encoded bytes)
@@ -328,9 +331,11 @@ export function getZoraCoinCalldata(
   if (!splitAddress.startsWith('0x') || splitAddress.length !== 42) {
     throw new Error(`Invalid split address: ${splitAddress}`);
   }
-  if (!metadataURI.startsWith('ipfs://')) {
+  // Accept both ipfs:// URIs and https:// gateway URLs
+  // The successful transaction used gateway URLs, so we support both
+  if (!metadataURI.startsWith('ipfs://') && !metadataURI.startsWith('https://')) {
     throw new Error(
-      `Invalid metadata URI. Must start with 'ipfs://': ${metadataURI}`
+      `Invalid metadata URI. Must start with 'ipfs://' or 'https://': ${metadataURI}`
     );
   }
   if (!title || title.length === 0) {
@@ -347,11 +352,13 @@ export function getZoraCoinCalldata(
   const pdaNumber = releaseId.split('-')[1] || 'UNKNOWN';
   const coinSymbol = `PDA${pdaNumber}`;
 
-  // Convert IPFS URI to w3s.link gateway URL
+  // Convert IPFS URI to w3s.link gateway URL if needed
   // Format: https://{cid}.ipfs.w3s.link/{releaseId}-{filename}
-  const metadataGatewayUrl = metadataURI.startsWith('ipfs://')
+  // Note: The successful transaction used gateway URLs, so we convert ipfs:// to gateway URLs
+  // If already a gateway URL, use it as-is
+  const finalMetadataURI = metadataURI.startsWith('ipfs://')
     ? `https://${metadataURI.replace('ipfs://', '')}.ipfs.w3s.link/${releaseId}-${metadataFilename}`
-    : metadataURI;
+    : metadataURI; // Already a gateway URL or other format
 
   // Generate pool config for ETH pair
   const poolConfig = encodeMultiCurvePoolConfig({
@@ -377,7 +384,7 @@ export function getZoraCoinCalldata(
     args: [
       splitAddress,            // payoutRecipient (split contract)
       [creatorAddress],        // owners (array)
-      metadataGatewayUrl,      // uri (HTTP gateway URL)
+      finalMetadataURI,        // uri (IPFS URI - preferred format per docs)
       title,                   // name
       coinSymbol,              // symbol
       poolConfig,              // poolConfig (encoded bytes)
@@ -399,5 +406,140 @@ export function getZoraCoinCalldata(
     value: '0',
     salt: finalCoinSalt,
   };
+}
+
+/**
+ * Extract Zora coin address from transaction receipt logs
+ * 
+ * Looks for CoinCreatedV4 event from the Zora coin factory contract.
+ * Event signature: 0x2de436107c2096e039c98bbcc3c5a2560583738ce15c234557eecb4d3221aa81
+ * 
+ * CoinCreatedV4 structure:
+ * - Topic 0: event signature
+ * - Topic 1: caller (indexed)
+ * - Topic 2: payoutRecipient (indexed)  
+ * - Topic 3: platformReferrer (indexed)
+ * - Data: currency, uri, name, symbol, coin, poolConfig
+ * 
+ * @param receipt - Transaction receipt with logs
+ * @param factoryAddress - Zora coin factory contract address
+ * @returns Coin address if found, null otherwise
+ */
+export function extractZoraCoinAddressFromLogs(
+  receipt: { logs?: Array<{ address?: string; topics?: string[]; data?: string }> },
+  factoryAddress: Address
+): Address | null {
+  if (!receipt.logs || receipt.logs.length === 0) {
+    console.log('   📋 No logs in receipt');
+    return null;
+  }
+
+  // CoinCreatedV4 event signature
+  const COIN_CREATED_V4_TOPIC = '0x2de436107c2096e039c98bbcc3c5a2560583738ce15c234557eecb4d3221aa81';
+
+  try {
+    for (const log of receipt.logs) {
+      // Check if this log is from the factory
+      if (log.address?.toLowerCase() !== factoryAddress.toLowerCase()) {
+        continue;
+      }
+
+      // Check if this is a CoinCreatedV4 event
+      if (!log.topics || log.topics[0]?.toLowerCase() !== COIN_CREATED_V4_TOPIC.toLowerCase()) {
+        continue;
+      }
+
+      console.log('   📋 Found CoinCreatedV4 event from factory');
+
+      // Try to decode using SDK ABI first
+      try {
+        // Cast topics to expected tuple type (we know topics[0] exists from check above)
+        const topics = (log.topics || []) as unknown as [`0x${string}`, ...`0x${string}`[]];
+        const decoded = decodeEventLog({
+          abi: coinFactoryABI,
+          data: (log.data || '0x') as `0x${string}`,
+          topics: topics.length > 0 ? topics : ([] as []),
+        });
+        
+        // The decoded event should have a 'coin' field
+        if ((decoded as any).args?.coin) {
+          console.log('   ✅ Decoded coin address via SDK ABI');
+          return (decoded as any).args.coin as Address;
+        }
+        if ((decoded as any).coin) {
+          console.log('   ✅ Decoded coin address via SDK ABI (direct)');
+          return (decoded as any).coin as Address;
+        }
+      } catch (sdkDecodeError) {
+        console.log('   📋 SDK ABI decode failed, trying manual decode...');
+      }
+
+      // Manual decode: CoinCreatedV4 data layout
+      // The data contains: currency, uri, name, symbol, coin, poolConfig
+      // Since uri, name, symbol are dynamic (strings), they use offset pointers
+      // We need to find the coin address which is a static address type
+      // 
+      // ABI: (address currency, string uri, string name, string symbol, address coin, tuple poolConfig)
+      // The coin address is at a specific offset in the decoded data
+      try {
+        // Decode the data portion
+        const decodedData = decodeAbiParameters(
+          [
+            { type: 'address', name: 'currency' },
+            { type: 'string', name: 'uri' },
+            { type: 'string', name: 'name' },
+            { type: 'string', name: 'symbol' },
+            { type: 'address', name: 'coin' },
+            { type: 'tuple', name: 'poolConfig', components: [
+              { type: 'int32', name: 'minTick' },
+              { type: 'int32', name: 'maxTick' },
+              { type: 'int32', name: 'tickSpacing' },
+            ]},
+          ],
+          log.data as `0x${string}`
+        );
+
+        const coinAddress = decodedData[4] as Address;
+        if (coinAddress && coinAddress !== zeroAddress) {
+          console.log(`   ✅ Manually decoded coin address: ${coinAddress}`);
+          return coinAddress;
+        }
+      } catch (manualDecodeError) {
+        console.log(`   ⚠️ Manual decode failed: ${manualDecodeError}`);
+      }
+
+      // Fallback: Look for any address that's not a known contract
+      // In the logs, the coin contract often emits events too
+      // Find Transfer event from 0x0 (mint) - the contract emitting this is the coin
+      console.log('   📋 Trying fallback: looking for Transfer mint event...');
+    }
+
+    // Fallback approach: Find Transfer event from zero address (mint)
+    // The contract that emits this Transfer is the coin itself
+    const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+    
+    for (const log of receipt.logs) {
+      if (!log.topics || log.topics[0]?.toLowerCase() !== TRANSFER_TOPIC.toLowerCase()) {
+        continue;
+      }
+      
+      // Check if 'from' (topic 1) is zero address (this is a mint)
+      if (log.topics[1]?.toLowerCase() === '0x0000000000000000000000000000000000000000000000000000000000000000') {
+        // This contract is minting tokens - it's likely the coin contract
+        const potentialCoin = log.address as Address;
+        
+        // Verify it's not the factory or other known contracts
+        if (potentialCoin.toLowerCase() !== factoryAddress.toLowerCase()) {
+          console.log(`   ✅ Found coin via Transfer mint event: ${potentialCoin}`);
+          return potentialCoin;
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Error extracting Zora coin address from logs:', error);
+  }
+
+  console.log('   ⚠️ Could not extract coin address from any method');
+  return null;
 }
 

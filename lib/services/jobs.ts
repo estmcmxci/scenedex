@@ -2,13 +2,10 @@ import { query as dbQuery } from '../db/database'
 import fs from 'fs'
 import { pinBufferToIPFS, extractAndPinCoverArt } from './ipfs'
 import { extractDuration, extractAllMetadata } from './musicMetadata'
-import { createSplitForRelease } from './splits'
-import { createCoinForRelease } from './zora'
-import { registerEROSRelease, createENSSubname, executeENSRecords } from './ens'
-import { getSplitCalldata } from './splits'
-import { getZoraCoinCalldata } from './zora'
-import { getENSCompleteCalldata } from './ens'
-import { createAndExecuteSafeTransaction } from './safe-transactions'
+import { createSplitForRelease, getSplitCalldata, extractSplitAddressFromLogs } from './splits'
+import { createCoinForRelease, getZoraCoinCalldata, extractZoraCoinAddressFromLogs } from './zora'
+import { registerEROSRelease, createENSSubname, executeENSRecords, getENSCompleteCalldata } from './ens'
+import { executeSimpleSafeTransaction, clearProtocolKitCache } from './safe-transactions'
 import { getSafeAddress } from './safe'
 import { zeroAddress } from 'viem'
 
@@ -157,12 +154,27 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
     const coverBuffer = tempFile.cover_data
     console.log(`✅ Loaded BLOBs: MP3=${(mp3Buffer.length / 1024 / 1024).toFixed(2)}MB${coverBuffer ? `, Cover=${(coverBuffer.length / 1024 / 1024).toFixed(2)}MB` : ''}`)
 
-    // Step 3: Get next EROS/SOMA number (needed for IPFS filenames)
-    console.log(`Step 3️⃣: Get next available EROS/SOMA number`)
-    const { getNextEROSNumber, formatEROSNumber } = await import('./ens')
-    const erosNumber = await getNextEROSNumber()
-    const erosId = formatEROSNumber(erosNumber)
-    console.log(`✅ EROS number assigned: ${erosId}`)
+    // Step 3: Extract ARES number from release ID (release ID is now in ARES001 format)
+    console.log(`Step 3️⃣: Extracting ARES number from release ID`)
+    const { formatEROSNumber } = await import('./ens')
+    
+    // Extract number from release ID (e.g., "ARES001" -> 1, "ARES042" -> 42)
+    let erosNumber: number
+    let erosId: string
+    
+    if (releaseId.match(/^ARES\d{3}$/i)) {
+      // New format: ARES001, ARES002, etc.
+      erosNumber = parseInt(releaseId.replace(/^ARES/i, ''), 10)
+      erosId = releaseId.toUpperCase()
+      console.log(`✅ ARES number extracted from release ID: ${erosId} (number: ${erosNumber})`)
+    } else {
+      // Fallback for old format: get next available number
+      console.log(`⚠️ Release ID "${releaseId}" doesn't match ARES format, getting next available number`)
+      const { getNextEROSNumber } = await import('./ens')
+      erosNumber = await getNextEROSNumber()
+      erosId = formatEROSNumber(erosNumber)
+      console.log(`✅ ARES number assigned: ${erosId}`)
+    }
 
     // Step 4: Pin media file to IPFS
     console.log(`Step 4️⃣: Pin media file to IPFS`)
@@ -226,14 +238,28 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
         catalogueId: erosId,
         databaseId: releaseId,
         
-        // Provenance: Proof of creation by submitter
-        submittedBy: creatorAddressFormatted, // Creator's wallet address
-        submittedAt: submissionTimestamp,    // Submission timestamp
+        // PROOF OF CREATOR - Cryptographic proof of who created/submitted this release
+        // This proves the creator's wallet submitted this release to the platform
+        proofOfCreator: {
+          address: creatorAddressFormatted,      // Creator's wallet address (ETH address)
+          timestamp: submissionTimestamp,        // When the release was submitted (Unix ms)
+          timestampISO: new Date(submissionTimestamp).toISOString(), // Human-readable timestamp
+          role: 'creator',                       // Role identifier
+          description: 'The wallet address that submitted this release to the Catalogue platform. This address receives 50% of revenue via the Split contract.',
+        },
         
-        // Provenance: Proof of publication by curator
-        publishedBy: safeAddressFormatted,    // Safe/Curator multisig address
-        publishedAt: publicationTimestamp,    // Publication timestamp
-        multisigAddress: safeAddressFormatted, // Safe contract address (for verification)
+        // PROOF OF PUBLISHER - Cryptographic proof of curator/platform publication
+        // This proves the curator multisig approved and published this release
+        proofOfPublisher: {
+          address: safeAddressFormatted,         // Safe/Curator multisig address
+          timestamp: publicationTimestamp,       // When the release was published (Unix ms)
+          timestampISO: new Date(publicationTimestamp).toISOString(), // Human-readable timestamp
+          role: 'publisher',                     // Role identifier
+          multisigType: 'Safe',                  // Type of multisig (Gnosis Safe)
+          chain: 'Base Sepolia',                 // Chain where Safe is deployed
+          chainId: 84532,                        // Chain ID
+          description: 'The Gnosis Safe multisig that approved and published this release on-chain. The Safe transaction hash serves as cryptographic proof of publication.',
+        },
         
         // Music metadata
         duration: Math.round(duration),
@@ -247,8 +273,8 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
           channels: allMetadata.numberOfChannels,
         },
         
-        // Note: Transaction hash will be added after execution (see publicationProof below)
-        // The Safe transaction hash serves as on-chain proof of publication
+        // Note: On-chain addresses (Split, Zora coin) are set in the ENS basename records
+        // The Safe transaction hash is recorded in the publication-proof.json file
       },
     }
 
@@ -262,29 +288,57 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
     const metadataURI = await pinBufferToIPFS(metadataBuffer, 'metadata.json', erosId)
     console.log(`✅ Metadata JSON pinned: ${metadataURI}`)
 
-    // Step 10: Build calldata for all on-chain operations
+    // Step 10: Build calldata for all on-chain operations (Split + Zora + Basename)
     console.log(`Step 1️⃣0️⃣: Build calldata for on-chain operations`)
-    const operations: Array<{ to: string; data: string; value: string }> = []
 
-    // 10a: Check if split and Zora contracts are already created (from client-side transactions)
-    // If they are, use those addresses. Otherwise, this is a fallback (shouldn't happen in new flow)
-    console.log(`   10a: Checking for pre-created contracts...`)
-    let actualSplitAddress: string | null = release.split_address || null
-    let actualZoraCoinAddress: string | null = release.zora_coin_address || null
-    let actualZoraCoinSymbol: string | null = release.zora_coin_symbol || null
-    
-    if (actualSplitAddress && actualZoraCoinAddress) {
-      console.log(`   ✅ Using pre-created contracts from database:`)
-      console.log(`      Split: ${actualSplitAddress}`)
-      console.log(`      Zora Coin: ${actualZoraCoinAddress}`)
-      console.log(`      Symbol: ${actualZoraCoinSymbol}`)
-    } else {
-      console.log(`   ⚠️  Contracts not pre-created - this is a fallback (shouldn't happen in new flow)`)
-      throw new Error(`Split and Zora contracts must be created client-side before Safe transaction`)
+    // 10a: Get Split calldata and predicted address
+    console.log(`   10a: Building Split creation calldata...`)
+    const submitterAddr = release.createdBy || release.createdby
+    if (!submitterAddr) {
+      throw new Error('Submitter address (createdBy) not found in release')
     }
+    const splitCalldataResult = await getSplitCalldata(
+      safeAddressFormatted,
+      `0x${submitterAddr.replace(/^0x/, '')}` as any,
+      releaseId // Pass releaseId to make split unique per release
+    )
+    const predictedSplitAddress = splitCalldataResult.predictedAddress
+    console.log(`   ✅ Split calldata ready, predicted address: ${predictedSplitAddress}`)
 
-    // 10c: Basenames calldata (ONLY operation in Safe transaction - Safe is on Base Sepolia)
-    console.log(`   10d: Building Basenames calldata...`)
+    // 10b: Get Zora coin calldata (uses predicted split address)
+    console.log(`   10b: Building Zora coin creation calldata...`)
+    // Generate deterministic salt based on releaseId for address prediction (if needed)
+    const { keccak256, encodePacked } = await import('viem')
+    const deterministicSalt = keccak256(
+      encodePacked(
+        ['string', 'string'],
+        [releaseId, 'zora-coin-salt']
+      )
+    )
+    const zoraCalldataResult = getZoraCoinCalldata(
+      releaseId,
+      creatorAddressFormatted,
+      predictedSplitAddress as any,
+      `ipfs://${metadataURI}`,
+      release.title,
+      'metadata.json',
+      deterministicSalt
+    )
+    // Extract coin symbol from releaseId (ARES001 → ARES001, or fallback for old format)
+    let zoraCoinSymbol: string
+    if (releaseId.match(/^ARES\d{3}$/i)) {
+      zoraCoinSymbol = releaseId.toUpperCase()
+    } else {
+      // Fallback for old PDA format
+      const pdaNumber = releaseId.split('-')[1] || 'UNKNOWN'
+      zoraCoinSymbol = `PDA${pdaNumber}`
+    }
+    console.log(`   ✅ Zora coin calldata ready, symbol: ${zoraCoinSymbol}`)
+
+    // 10c: Basenames calldata (uses predicted addresses - will verify after execution)
+    console.log(`   10c: Building Basenames calldata...`)
+    // Note: We use zeroAddress as placeholder for Zora coin address since we can't predict it easily
+    // We'll extract it from logs after execution and update the database
     const ensCalldata = await getENSCompleteCalldata(
       {
         id: release.id,
@@ -299,32 +353,257 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
         createdAt: release.createdAt,
         status: 'published',
       } as any,
-      actualZoraCoinAddress || zeroAddress, // Coin address (Zora) - already created on Base Sepolia
-      actualZoraCoinSymbol || ('PDA' + erosNumber.toString().padStart(3, '0')), // Coin symbol
-      actualSplitAddress, // Split address - already created on Base Sepolia
+      zeroAddress, // Placeholder - will extract from logs after execution
+      zoraCoinSymbol, // We know the symbol from releaseId
+      predictedSplitAddress, // Use predicted split address
       creatorAddressFormatted,
       safeAddressFormatted,
       erosNumber
     )
-    operations.push(...ensCalldata)
     console.log(`   ✅ Basenames calldata ready (${ensCalldata.length} operations)`)
 
-    // 10d: Reverse record calldata (set Safe primary name to parent domain)
-    console.log(`   10e: Building reverse record calldata...`)
-    const { getReverseRecordCalldata } = await import('./ens')
-    const reverseRecordCalldata = getReverseRecordCalldata(safeAddressFormatted)
-    operations.push(reverseRecordCalldata)
-    console.log(`   ✅ Reverse record calldata ready (Safe → ${process.env.ENS_DOMAIN || 'scenius.basetest.eth'})`)
+    // Step 11: Split operations into separate Safe transactions for isolation
+    // This allows us to identify exactly which operation fails and why
+    console.log(`Step 1️⃣1️⃣: Splitting operations into separate Safe transactions for isolation`)
+    console.log(`   ⚠️  Each major operation in separate transaction to isolate failures`)
+    
+    // Verify ensCalldata has expected operations
+    if (ensCalldata.length === 0) {
+      throw new Error('ENS calldata is empty - expected at least 1 setSubnodeRecord operation')
+    }
+    
+    // Split basename operations: first is setSubnodeRecord, rest are resolver operations
+    const setSubnodeRecordOp = ensCalldata[0]! // First operation is setSubnodeRecord (verified above)
+    const resolverOps = ensCalldata.slice(1) // Rest are setAddr + setText operations
+    
+    // Transaction 1: setSubnodeRecord alone (creates subname)
+    const tx1Operations = [setSubnodeRecordOp]
+    
+    // Transaction 2: Split creation alone
+    const tx2Operations = [{
+      to: splitCalldataResult.to,
+      data: splitCalldataResult.data,
+      value: splitCalldataResult.value,
+    }]
+    
+    // Transaction 3: Zora coin creation alone (will be regenerated with actual split address after Transaction 2)
+    let tx3Operations = [{
+      to: zoraCalldataResult.to,
+      data: zoraCalldataResult.data,
+      value: zoraCalldataResult.value,
+    }]
+    
+    // Transaction 4: Resolver operations (can batch these since they're all resolver calls)
+    const tx4Operations = resolverOps
+    
+    console.log(`   ✅ Split into 4 Safe transactions:`)
+    console.log(`      Transaction 1: setSubnodeRecord (creates subname)`)
+    console.log(`      Transaction 2: Split creation`)
+    console.log(`      Transaction 3: Zora coin creation`)
+    console.log(`      Transaction 4: ${tx4Operations.length} resolver operations (setAddr + setText)\n`)
 
-    // Step 11: Execute Safe transaction
-    console.log(`Step 1️⃣1️⃣: Execute Safe transaction with ${operations.length} operations`)
-    const txResult = await createAndExecuteSafeTransaction(operations)
-    const safeTxHash = txResult.hash || (txResult as any).safeTxHash || 'UNKNOWN'
-    console.log(`✅ Safe transaction executed: ${safeTxHash}`)
+    // Helper function to wait for transaction and clear cache
+    const waitAndClearCache = async (txHash: string, txNumber: number) => {
+      console.log(`   ⏳ Waiting for Transaction ${txNumber} to be mined...`)
+      try {
+        const { createPublicClient, http } = await import('viem')
+        const { baseSepolia } = await import('viem/chains')
+        const publicClient = createPublicClient({
+          chain: baseSepolia,
+          transport: http(process.env.BASE_RPC_URL!),
+        })
+        const receipt = await publicClient.waitForTransactionReceipt({
+          hash: txHash as `0x${string}`,
+        })
+        console.log(`   ✅ Transaction ${txNumber} confirmed in block ${receipt.blockNumber}`)
+        
+        // Wait for nonce to update
+        console.log(`   ⏳ Waiting 2 seconds for Safe nonce to update...`)
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        
+        // Clear Protocol Kit cache (already imported at top)
+        clearProtocolKitCache()
+        console.log(`   ✅ Cleared Safe instance cache - ready for next transaction`)
+      } catch (error) {
+        console.warn(`   ⚠️  Could not wait for Transaction ${txNumber} confirmation:`, error)
+        console.log(`   ⏳ Waiting 3 seconds before next transaction (fallback delay)...`)
+        await new Promise(resolve => setTimeout(resolve, 3000))
+      }
+    }
 
-    // Step 11a: Wait for Safe transaction confirmation (Basenames operations)
-    console.log(`Step 1️⃣1️⃣a: Wait for Safe transaction confirmation (Basenames operations)...`)
-    let receipt: any = null // Store receipt for publication proof
+    // Track transaction results
+    const txResults: Array<{ number: number; name: string; hash: string | null; success: boolean; error?: string }> = []
+    
+    // Step 11a: Execute Transaction 1 (setSubnodeRecord)
+    console.log(`Step 1️⃣1️⃣a: Execute Transaction 1 (setSubnodeRecord)`)
+    let tx1Hash: string | null = null
+    try {
+      const tx1Result = await executeSimpleSafeTransaction(tx1Operations)
+      tx1Hash = tx1Result.hash || (tx1Result as any).safeTxHash || 'UNKNOWN'
+      console.log(`✅ Transaction 1 executed: ${tx1Hash}`)
+      txResults.push({ number: 1, name: 'setSubnodeRecord', hash: tx1Hash, success: true })
+      if (tx1Hash) await waitAndClearCache(tx1Hash, 1)
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error)
+      console.error(`❌ Transaction 1 failed: ${errorMsg}`)
+      txResults.push({ number: 1, name: 'setSubnodeRecord', hash: null, success: false, error: errorMsg })
+      console.log(`   ⚠️  Continuing to next transaction...`)
+      await new Promise(resolve => setTimeout(resolve, 2000)) // Wait before next
+    }
+
+    // Step 11b: Execute Transaction 2 (Split creation)
+    console.log(`\nStep 1️⃣1️⃣b: Execute Transaction 2 (Split creation)`)
+    let tx2Hash: string | null = null
+    try {
+      const tx2Result = await executeSimpleSafeTransaction(tx2Operations)
+      tx2Hash = tx2Result.hash || (tx2Result as any).safeTxHash || 'UNKNOWN'
+      console.log(`✅ Transaction 2 executed: ${tx2Hash}`)
+      txResults.push({ number: 2, name: 'Split creation', hash: tx2Hash, success: true })
+      if (tx2Hash) await waitAndClearCache(tx2Hash, 2)
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error)
+      console.error(`❌ Transaction 2 failed: ${errorMsg}`)
+      txResults.push({ number: 2, name: 'Split creation', hash: null, success: false, error: errorMsg })
+      console.log(`   ⚠️  Continuing to next transaction...`)
+      await new Promise(resolve => setTimeout(resolve, 2000)) // Wait before next
+    }
+    
+    // Extract split address from Transaction 2 for use in Transaction 3 (Zora needs split address)
+    let actualSplitAddress: string | null = predictedSplitAddress
+    if (tx2Hash) {
+      try {
+        const { createPublicClient, http } = await import('viem')
+        const { baseSepolia } = await import('viem/chains')
+        const publicClient = createPublicClient({
+          chain: baseSepolia,
+          transport: http(process.env.BASE_RPC_URL!),
+        })
+        const receipt = await publicClient.getTransactionReceipt({
+          hash: tx2Hash as `0x${string}`,
+        })
+        const { extractSplitAddressFromLogs } = await import('./splits')
+        const extractedSplit = await extractSplitAddressFromLogs(receipt, predictedSplitAddress as any)
+        if (extractedSplit) {
+          actualSplitAddress = extractedSplit
+          console.log(`   ✅ Split address extracted from Transaction 2: ${actualSplitAddress}`)
+          
+          // Verify split contract has code (is deployed)
+          const splitCode = await publicClient.getCode({ address: actualSplitAddress as `0x${string}` })
+          if (splitCode && splitCode !== '0x') {
+            console.log(`   ✅ Split contract verified (has code)`)
+          } else {
+            console.warn(`   ⚠️  Split contract has no code - may not be fully deployed yet`)
+          }
+        } else {
+          console.warn(`   ⚠️  Could not extract split address, using predicted: ${predictedSplitAddress}`)
+        }
+      } catch (error) {
+        console.warn(`   ⚠️  Could not extract split address:`, error)
+      }
+    } else {
+      console.warn(`   ⚠️  Transaction 2 failed, using predicted split address: ${predictedSplitAddress}`)
+    }
+
+    // Step 11c: Regenerate Zora calldata with actual split address (if different from predicted)
+    // This ensures we use the real split address, not just the predicted one
+    console.log(`\nStep 1️⃣1️⃣c: Regenerate Zora calldata with actual split address`)
+    
+    // If actual split address differs from predicted, regenerate Zora calldata
+    if (actualSplitAddress && actualSplitAddress.toLowerCase() !== predictedSplitAddress.toLowerCase()) {
+      console.log(`   🔄 Actual split address differs from predicted - regenerating Zora calldata...`)
+      const { keccak256, encodePacked } = await import('viem')
+      const deterministicSalt = keccak256(
+        encodePacked(
+          ['string', 'string'],
+          [releaseId, 'zora-coin-salt']
+        )
+      )
+      const { getZoraCoinCalldata } = await import('./zora')
+      const regeneratedZoraCalldata = getZoraCoinCalldata(
+        releaseId,
+        creatorAddressFormatted,
+        actualSplitAddress as any, // Use actual split address
+        `ipfs://${metadataURI}`,
+        release.title,
+        'metadata.json',
+        deterministicSalt
+      )
+      tx3Operations = [{
+        to: regeneratedZoraCalldata.to,
+        data: regeneratedZoraCalldata.data,
+        value: regeneratedZoraCalldata.value,
+      }]
+      console.log(`   ✅ Zora calldata regenerated with actual split address: ${actualSplitAddress}`)
+    } else {
+      console.log(`   ✅ Using original Zora calldata (split address matches predicted)`)
+    }
+
+    // Step 11c: Execute Transaction 3 (Zora coin creation)
+    console.log(`\nStep 1️⃣1️⃣c: Execute Transaction 3 (Zora coin creation)`)
+    let tx3Hash: string | null = null
+    try {
+      const tx3Result = await executeSimpleSafeTransaction(tx3Operations)
+      tx3Hash = tx3Result.hash || (tx3Result as any).safeTxHash || 'UNKNOWN'
+      console.log(`✅ Transaction 3 executed: ${tx3Hash}`)
+      txResults.push({ number: 3, name: 'Zora coin creation', hash: tx3Hash, success: true })
+      if (tx3Hash) await waitAndClearCache(tx3Hash, 3)
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error)
+      console.error(`❌ Transaction 3 failed: ${errorMsg}`)
+      txResults.push({ number: 3, name: 'Zora coin creation', hash: null, success: false, error: errorMsg })
+      console.log(`   ⚠️  Continuing to next transaction...`)
+      await new Promise(resolve => setTimeout(resolve, 2000)) // Wait before next
+    }
+
+    // Step 11d: Execute Transaction 4 (Resolver operations)
+    console.log(`\nStep 1️⃣1️⃣d: Execute Transaction 4 (Resolver operations)`)
+    let tx4Hash: string | null = null
+    try {
+      const tx4Result = await executeSimpleSafeTransaction(tx4Operations)
+      tx4Hash = tx4Result.hash || (tx4Result as any).safeTxHash || 'UNKNOWN'
+      console.log(`✅ Transaction 4 executed: ${tx4Hash}`)
+      txResults.push({ number: 4, name: 'Resolver operations', hash: tx4Hash, success: true })
+      // Wait for Transaction 4 to be mined and clear cache before Transaction 5
+      if (tx4Hash) await waitAndClearCache(tx4Hash, 4)
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error)
+      console.error(`❌ Transaction 4 failed: ${errorMsg}`)
+      txResults.push({ number: 4, name: 'Resolver operations', hash: null, success: false, error: errorMsg })
+      // Still wait before next transaction even if this one failed
+      await new Promise(resolve => setTimeout(resolve, 2000))
+    }
+    
+    // Print summary of all transactions
+    console.log(`\n📊 TRANSACTION SUMMARY:`)
+    console.log(`================================================`)
+    for (const result of txResults) {
+      if (result.success) {
+        console.log(`   ✅ Transaction ${result.number} (${result.name}): ${result.hash}`)
+      } else {
+        console.log(`   ❌ Transaction ${result.number} (${result.name}): FAILED`)
+        if (result.error) {
+          console.log(`      Error: ${result.error.substring(0, 200)}${result.error.length > 200 ? '...' : ''}`)
+        }
+      }
+    }
+    console.log(`================================================\n`)
+    
+    // Use Transaction 3 hash as the main transaction hash (contains Zora, which is the most complex)
+    // But we'll extract addresses from all transactions
+    // If Transaction 3 failed, use the last successful transaction
+    const safeTxHash = tx3Hash || tx2Hash || tx1Hash || tx4Hash || 'UNKNOWN'
+
+    // Variables to store extracted addresses (actualSplitAddress already extracted above)
+    let actualZoraCoinAddress: string | null = null
+    const actualZoraCoinSymbol = zoraCoinSymbol // Already computed from releaseId
+    // Compute ENS subname from erosNumber (deterministic)
+    const ensSubnameLabel = formatEROSNumber(erosNumber)
+    const parentDomain = process.env.ENS_DOMAIN || 'scenius.basetest.eth'
+    const ensSubname = `${ensSubnameLabel}.${parentDomain}`
+
+    // Step 11e: Extract addresses from individual transactions
+    console.log(`Step 1️⃣1️⃣e: Extract addresses from individual transactions...`)
+    let receipt: any = null // Store receipt for publication proof (use Transaction 3 for Zora)
     
     try {
       const { createPublicClient, http } = await import('viem')
@@ -336,53 +615,189 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
         transport: http(rpcUrl),
       })
       
-      // Wait for the Safe transaction receipt
-      receipt = await publicClient.waitForTransactionReceipt({
-        hash: safeTxHash as `0x${string}`,
-      })
+      // Extract split address from Transaction 2 (already done above, but verify)
+      if (actualSplitAddress && actualSplitAddress !== predictedSplitAddress) {
+        console.log(`   ✅ Split address from Transaction 2: ${actualSplitAddress}`)
+      } else {
+        console.log(`   ✅ Using predicted split address: ${actualSplitAddress}`)
+      }
       
-      console.log(`   ✅ Transaction confirmed at block ${receipt.blockNumber}`)
-      console.log(`   📋 Transaction logs: ${receipt.logs.length} entries`)
-      console.log(`   📝 Safe transaction handled Basenames registration on Base Sepolia`)
-      console.log(`   📝 All operations (Split, Zora, Basenames) are on Base Sepolia`)
+      // Extract Zora coin address from Transaction 3 (if it succeeded)
+      if (tx3Hash) {
+        console.log(`   Extracting Zora coin address from Transaction 3...`)
+        try {
+          const tx3Receipt = await publicClient.getTransactionReceipt({
+            hash: tx3Hash as `0x${string}`,
+          })
+          receipt = tx3Receipt // Use for publication proof
+          
+          const factoryAddress = process.env.ZORA_COIN_FACTORY_ADDRESS
+          if (factoryAddress) {
+            const { extractZoraCoinAddressFromLogs } = await import('./zora')
+            const extractedZoraAddress = extractZoraCoinAddressFromLogs(tx3Receipt, factoryAddress as any)
+            if (extractedZoraAddress) {
+              actualZoraCoinAddress = extractedZoraAddress
+              console.log(`   ✅ Zora coin address extracted: ${actualZoraCoinAddress}`)
+            } else {
+              console.warn(`   ⚠️ Could not extract Zora coin address from Transaction 3 logs`)
+            }
+          } else {
+            console.warn(`   ⚠️ ZORA_COIN_FACTORY_ADDRESS not set, cannot extract coin address`)
+          }
+          
+          console.log(`   ✅ Transaction 3 confirmed at block ${tx3Receipt.blockNumber}`)
+          console.log(`   📋 Transaction logs: ${tx3Receipt.logs.length} entries`)
+        } catch (error) {
+          console.warn(`   ⚠️  Could not extract Zora address from Transaction 3:`, error)
+        }
+      } else {
+        console.warn(`   ⚠️  Transaction 3 failed, cannot extract Zora coin address`)
+        // Use Transaction 2 receipt for publication proof if available
+        if (tx2Hash) {
+          try {
+            receipt = await publicClient.getTransactionReceipt({
+              hash: tx2Hash as `0x${string}`,
+            })
+          } catch (e) {
+            // Ignore
+          }
+        }
+      }
       
     } catch (error) {
-      console.warn(`⚠️  Failed to wait for transaction confirmation:`, error)
-      // Continue anyway - transaction may still be processing
+      console.warn(`⚠️  Failed to extract addresses:`, error)
+      // Don't throw - continue with what we have
     }
 
-    // Step 11c: Create publication proof JSON with transaction hash
-    console.log(`Step 1️⃣1️⃣c: Create publication proof JSON with transaction hash...`)
+    // Step 11f: Update ENS record with actual Zora coin address (if extracted)
+    if (actualZoraCoinAddress && actualZoraCoinAddress !== zeroAddress) {
+      console.log(`\nStep 1️⃣1️⃣f: Execute Transaction 5 (Update zoraCoinAddress in ENS)`)
+      try {
+        const { namehash, encodeFunctionData } = await import('viem')
+        
+        // Calculate the subname node
+        const parentDomain = process.env.ENS_DOMAIN || 'scenius.basetest.eth'
+        const fullSubname = `${erosId.toLowerCase()}.${parentDomain}`
+        const subnameNode = namehash(fullSubname)
+        const RESOLVER_ADDRESS = process.env.ENS_RESOLVER_BASE_SEPOLIA || '0x85C87e548091f204C2d0350b39ce1874f02197c6'
+        
+        // Build setText calldata for zoraCoinAddress
+        const RESOLVER_ABI = [
+          {
+            name: 'setText',
+            type: 'function',
+            stateMutability: 'nonpayable',
+            inputs: [
+              { name: 'node', type: 'bytes32' },
+              { name: 'key', type: 'string' },
+              { name: 'value', type: 'string' },
+            ],
+            outputs: [],
+          },
+        ] as const
+        
+        const updateZoraOp = {
+          to: RESOLVER_ADDRESS,
+          data: encodeFunctionData({
+            abi: RESOLVER_ABI,
+            functionName: 'setText',
+            args: [subnameNode as `0x${string}`, 'eth.scenedex.zoraCoinAddress', actualZoraCoinAddress],
+          }),
+          value: '0',
+        }
+        
+        console.log(`   Updating eth.scenedex.zoraCoinAddress to: ${actualZoraCoinAddress}`)
+        
+        const tx5Result = await executeSimpleSafeTransaction([updateZoraOp])
+        const tx5Hash = tx5Result.hash
+        console.log(`✅ Transaction 5 executed: ${tx5Hash}`)
+        txResults.push({ number: 5, name: 'Update zoraCoinAddress in ENS', hash: tx5Hash, success: true })
+        
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error)
+        console.error(`❌ Transaction 5 failed: ${errorMsg}`)
+        txResults.push({ number: 5, name: 'Update zoraCoinAddress in ENS', hash: null, success: false, error: errorMsg })
+        // Continue - this is non-critical, the coin address is in the publication proof
+      }
+    } else {
+      console.log(`\n⚠️  Skipping Transaction 5 (no Zora coin address to update)`)
+    }
+
+    // Step 11g: Create publication proof JSON with transaction hash
+    console.log(`Step 1️⃣1️⃣g: Create publication proof JSON with transaction hash...`)
     let publicationProofURI: string | null = null
     try {
       const publicationProof = {
+        // Schema version for future compatibility
+        version: '1.0.0',
+        
         // Reference to the main metadata
-        metadataURI: metadataURI,
-        metadataCID: metadataURI.replace('ipfs://', ''),
+        metadata: {
+          uri: `ipfs://${metadataURI}`,
+          cid: metadataURI,
+          gatewayUrl: `https://${metadataURI}.ipfs.w3s.link`,
+        },
         
-        // Transaction proof: Safe transaction hash serves as on-chain proof
-        transactionHash: safeTxHash,
-        transactionChain: 'baseSepolia', // Safe is on Base Sepolia
-        transactionBlockNumber: receipt?.blockNumber?.toString() || null,
+        // PROOF OF CREATOR - Cryptographic proof of who created this release
+        proofOfCreator: {
+          address: creatorAddressFormatted,
+          timestamp: submissionTimestamp,
+          timestampISO: new Date(submissionTimestamp).toISOString(),
+          role: 'creator',
+          revenueShare: '50%',
+          description: 'The wallet address that submitted this release. Receives 50% of revenue via the Split contract.',
+        },
         
-        // Provenance (duplicated from metadata for verification)
-        submittedBy: creatorAddressFormatted,
-        submittedAt: submissionTimestamp,
-        publishedBy: safeAddressFormatted,
-        publishedAt: publicationTimestamp,
-        multisigAddress: safeAddressFormatted,
+        // PROOF OF PUBLISHER - Cryptographic proof of curator publication
+        proofOfPublisher: {
+          address: safeAddressFormatted,
+          timestamp: publicationTimestamp,
+          timestampISO: new Date(publicationTimestamp).toISOString(),
+          role: 'publisher',
+          multisigType: 'Safe',
+          chain: 'Base Sepolia',
+          chainId: 84532,
+          revenueShare: '50%',
+          description: 'The Gnosis Safe multisig that approved and published this release on-chain.',
+        },
+        
+        // On-chain transaction proof
+        transactionProof: {
+          hash: safeTxHash,
+          chain: 'Base Sepolia',
+          chainId: 84532,
+          blockNumber: receipt?.blockNumber?.toString() || null,
+          explorerUrl: `https://sepolia.basescan.org/tx/${safeTxHash}`,
+          description: 'The Safe transaction hash serves as cryptographic proof that the curator approved and published this release.',
+        },
         
         // Release identifiers
-        catalogueId: erosId,
-        databaseId: releaseId,
+        identifiers: {
+          catalogueId: erosId,
+          databaseId: releaseId,
+          ensSubname: `${erosId.toLowerCase()}.${process.env.ENS_DOMAIN || 'scenius.basetest.eth'}`,
+        },
         
-        // On-chain addresses (deployed contracts)
-        splitAddress: actualSplitAddress,
-        zoraCoinAddress: actualZoraCoinAddress,
-        zoraCoinSymbol: actualZoraCoinSymbol,
+        // On-chain deployed contracts
+        contracts: {
+          splitAddress: actualSplitAddress,
+          splitDescription: 'Revenue split contract (0xSplits) - distributes funds 50/50 between creator and publisher',
+          zoraCoinAddress: actualZoraCoinAddress,
+          zoraCoinSymbol: zoraCoinSymbol,
+          zoraCoinDescription: 'Zora creator coin - ERC20 token for this release',
+        },
         
-        // Verification note
-        note: 'This publication proof links the immutable metadata to the on-chain transaction. The Safe transaction hash serves as cryptographic proof that the curator (multisig) published this release.',
+        // Verification instructions
+        verification: {
+          howToVerify: [
+            '1. Verify Safe transaction on BaseScan using the transactionProof.explorerUrl',
+            '2. Verify creator address owns 50% of Split contract',
+            '3. Verify publisher (Safe) address owns 50% of Split contract',
+            '4. Verify Zora coin payoutRecipient is the Split contract address',
+            '5. Verify ENS basename records match the metadata',
+          ],
+          note: 'This publication proof creates an immutable link between the creator, publisher, and on-chain assets.',
+        },
       }
       
       const proofJSON = JSON.stringify(publicationProof, null, 2)
@@ -413,8 +828,9 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
            split_address = $12,
            zora_coin_address = $13,
            zora_coin_symbol = $14,
+           ensSubname = $15,
            status = 'published'
-       WHERE id = $15`,
+       WHERE id = $16`,
       [
         mediaIPFSHash,
         coverImageIPFSHash || null,
@@ -429,7 +845,8 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
         allMetadata.codec || null,
         actualSplitAddress,
         actualZoraCoinAddress,
-        actualZoraCoinSymbol,
+        zoraCoinSymbol,
+        ensSubname,
         releaseId,
       ]
     )
@@ -438,8 +855,9 @@ export async function publishReleaseViaSafe(releaseId: string, curatorWalletAddr
       console.log(`   Split Address: ${actualSplitAddress}`)
     }
     if (actualZoraCoinAddress) {
-      console.log(`   Zora Coin: ${actualZoraCoinAddress}`)
+      console.log(`   Zora Coin: ${actualZoraCoinAddress} (${zoraCoinSymbol})`)
     }
+    console.log(`   ENS Subname: ${ensSubname}`)
 
     // Step 13: Delete temp_files
     console.log(`Step 1️⃣3️⃣: Delete temp_files from database`)
@@ -521,12 +939,28 @@ export async function publishRelease(releaseId: string): Promise<void> {
     const coverBuffer = tempFile.cover_data
     console.log(`✅ Loaded BLOBs: MP3=${(mp3Buffer.length / 1024 / 1024).toFixed(2)}MB${coverBuffer ? `, Cover=${(coverBuffer.length / 1024 / 1024).toFixed(2)}MB` : ''}`)
 
-    // Step 3: Get next EROS/SOMA number (needed for IPFS filenames)
-    console.log(`Step 3️⃣: Get next available EROS/SOMA number`)
-    const { getNextEROSNumber, formatEROSNumber } = await import('./ens')
-    const erosNumber = await getNextEROSNumber()
-    const erosId = formatEROSNumber(erosNumber)
-    console.log(`✅ EROS number assigned: ${erosId}`)
+    // Step 3: Extract ARES number from release ID (release ID is now in ARES001 format)
+    console.log(`Step 3️⃣: Extracting ARES number from release ID`)
+    const { formatEROSNumber } = await import('./ens')
+    
+    // Extract number from release ID (e.g., "ARES001" -> 1, "ARES042" -> 42)
+    let erosNumber: number
+    let erosId: string
+    
+    if (releaseId.match(/^ARES\d{3}$/i)) {
+      // New format: ARES001, ARES002, etc.
+      erosNumber = parseInt(releaseId.replace(/^ARES/i, ''), 10)
+      erosId = releaseId.toUpperCase()
+      console.log(`✅ ARES number extracted from release ID: ${erosId} (number: ${erosNumber})`)
+    } else {
+      // Fallback for old format: get next available number
+      console.log(`⚠️ Release ID "${releaseId}" doesn't match ARES format, getting next available number`)
+      const { getNextEROSNumber } = await import('./ens')
+      erosNumber = await getNextEROSNumber()
+      erosId = formatEROSNumber(erosNumber)
+      console.log(`✅ ARES number assigned: ${erosId}`)
+    }
+    
     console.log(`   Database ID: ${releaseId}`)
     console.log(`   IPFS filename ID: ${erosId}`)
 

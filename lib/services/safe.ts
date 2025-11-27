@@ -7,9 +7,14 @@ const SAFE_ABI = [
   'function getThreshold() external view returns (uint256)',
 ]
 
-const provider = new ethers.JsonRpcProvider(
-  process.env.SEPOLIA_RPC_URL!
-)
+// Lazy-loaded provider (Base Sepolia) - only created when needed
+let _provider: ethers.JsonRpcProvider | null = null
+function getProvider(): ethers.JsonRpcProvider {
+  if (!_provider) {
+    _provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL!)
+  }
+  return _provider
+}
 
 interface VerifySignatureResult {
   success: boolean
@@ -55,7 +60,7 @@ export async function isSafeMember(
     const safe = new ethers.Contract(
       safeAddress,
       SAFE_ABI,
-      provider
+      getProvider()
     ) as any
 
     const owners = await safe.getOwners() as string[]
@@ -80,7 +85,7 @@ export async function getApprovalThreshold(
     const safe = new ethers.Contract(
       safeAddress,
       SAFE_ABI,
-      provider
+      getProvider()
     ) as any
 
     return Number(await safe.getThreshold())
@@ -112,10 +117,16 @@ export async function getSafeAddress(walletAddress?: string): Promise<string> {
     'SELECT safe_address FROM curator_settings LIMIT 1'
   )
 
-  if (settings.rows.length === 0) {
-    throw new Error('No Safe address found. Please link a Safe to your wallet or configure curator_settings.')
+  if (settings.rows.length > 0) {
+    return settings.rows[0].safe_address
   }
 
-  return settings.rows[0].safe_address
+  // Final fallback: check environment variable (useful for testing/development)
+  const envSafeAddress = process.env.SAFE_ADDRESS || process.env.CURATOR_SAFE_ADDRESS
+  if (envSafeAddress) {
+    return envSafeAddress
+  }
+
+  throw new Error('No Safe address found. Please link a Safe to your wallet, configure curator_settings, or set SAFE_ADDRESS in environment variables.')
 }
 
